@@ -541,8 +541,13 @@ async function processSarahReply(chatMessages: Message[]): Promise<string> {
         receivedAt: new Date().toISOString(),
         application
       })
-      fs.appendFileSync("applications.log", logLine + "\n", "utf8")
-      console.log("Application collected and stored")
+      const appsLogFile = process.env.VERCEL ? path.join("/tmp", "applications.log") : "applications.log"
+      try {
+        fs.appendFileSync(appsLogFile, logLine + "\n", "utf8")
+        console.log("Application collected and stored")
+      } catch (logErr) {
+        console.warn("Could not write to applications.log:", logErr)
+      }
 
       if (isMailerConfigured()) {
         try {
@@ -562,8 +567,13 @@ async function processSarahReply(chatMessages: Message[]): Promise<string> {
   return finalReply
 }
 
-const server = http.createServer(async (req, res) => {
-  if (req.method === "POST" && req.url === "/api/auth/register") {
+export async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const host = req.headers.host || "localhost"
+  const rawUrl = (req.headers["x-forwarded-uri"] as string) || req.url || "/"
+  const parsedUrl = new URL(rawUrl, `http://${host}`)
+  const pathname = parsedUrl.pathname
+
+  if (req.method === "POST" && pathname === "/api/auth/register") {
     const bodyResult = await readJsonBody(req)
     if (!bodyResult.ok) {
       respondJson(res, bodyResult.status, { error: bodyResult.error })
@@ -605,7 +615,7 @@ const server = http.createServer(async (req, res) => {
     respondJson(res, 201, { user: toPublicUser(result.user) }, {
       "Set-Cookie": sessionCookieHeader(session.token)
     })
-  } else if (req.method === "POST" && req.url === "/api/auth/login") {
+  } else if (req.method === "POST" && pathname === "/api/auth/login") {
     const bodyResult = await readJsonBody(req)
     if (!bodyResult.ok) {
       respondJson(res, bodyResult.status, { error: bodyResult.error })
@@ -630,19 +640,19 @@ const server = http.createServer(async (req, res) => {
     respondJson(res, 200, { user: toPublicUser(user) }, {
       "Set-Cookie": sessionCookieHeader(session.token)
     })
-  } else if (req.method === "POST" && req.url === "/api/auth/logout") {
+  } else if (req.method === "POST" && pathname === "/api/auth/logout") {
     revokeSessionByCookie(req.headers.cookie)
     respondJson(res, 200, { ok: true }, {
       "Set-Cookie": clearSessionCookieHeader()
     })
-  } else if (req.method === "GET" && req.url === "/api/auth/me") {
+  } else if (req.method === "GET" && pathname === "/api/auth/me") {
     const user = getSessionUser(req.headers.cookie)
     if (!user) {
       respondJson(res, 401, { error: "Not authenticated" })
       return
     }
     respondJson(res, 200, { user: toPublicUser(user) })
-  } else if (req.method === "POST" && req.url === "/api/auth/forgot-password") {
+  } else if (req.method === "POST" && pathname === "/api/auth/forgot-password") {
     const bodyResult = await readJsonBody(req)
     if (!bodyResult.ok) {
       respondJson(res, bodyResult.status, { error: bodyResult.error })
@@ -674,7 +684,7 @@ const server = http.createServer(async (req, res) => {
       ok: true,
       message: "If the email is registered, a reset code has been sent to it."
     })
-  } else if (req.method === "POST" && req.url === "/api/auth/reset-password") {
+  } else if (req.method === "POST" && pathname === "/api/auth/reset-password") {
     const bodyResult = await readJsonBody(req)
     if (!bodyResult.ok) {
       respondJson(res, bodyResult.status, { error: bodyResult.error })
@@ -705,7 +715,7 @@ const server = http.createServer(async (req, res) => {
     } else {
       respondJson(res, 400, { error: "The reset code is invalid or has expired." })
     }
-  } else if (req.method === "POST" && req.url === "/api/conversations") {
+  } else if (req.method === "POST" && pathname === "/api/conversations") {
     const user = getSessionUser(req.headers.cookie)
     if (!user) {
       respondJson(res, 401, { error: "Not authenticated" })
@@ -723,7 +733,7 @@ const server = http.createServer(async (req, res) => {
     }
     writeConversation(conversation)
     respondJson(res, 201, { conversation })
-  } else if (req.method === "POST" && req.url === "/api/chat") {
+  } else if (req.method === "POST" && pathname === "/api/chat") {
     const user = getSessionUser(req.headers.cookie)
     if (!user) {
       respondJson(res, 401, { error: "Not authenticated" })
@@ -789,7 +799,7 @@ const server = http.createServer(async (req, res) => {
       console.error("Error:", err)
       respondJson(res, 500, { error: (err as Error).message })
     }
-  } else if (req.method === "POST" && req.url === "/chat") {
+  } else if (req.method === "POST" && pathname === "/chat") {
     const user = getSessionUser(req.headers.cookie)
     if (!user) {
       respondJson(res, 401, { error: "Not authenticated" })
@@ -836,11 +846,10 @@ const server = http.createServer(async (req, res) => {
       console.error("Error:", err)
       respondJson(res, 500, { error: (err as Error).message })
     }
-  } else if (req.method === "GET" && new URL(req.url || "/", `http://${req.headers.host || "localhost"}`).pathname === "/webhook") {
-    const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`)
-    const mode = url.searchParams.get("hub.mode")
-    const token = url.searchParams.get("hub.verify_token")
-    const challenge = url.searchParams.get("hub.challenge")
+  } else if (req.method === "GET" && pathname === "/webhook") {
+    const mode = parsedUrl.searchParams.get("hub.mode")
+    const token = parsedUrl.searchParams.get("hub.verify_token")
+    const challenge = parsedUrl.searchParams.get("hub.challenge")
 
     if (mode === "subscribe" && token && token === process.env.INSTAGRAM_VERIFY_TOKEN) {
       res.writeHead(200, {
@@ -853,7 +862,7 @@ const server = http.createServer(async (req, res) => {
       })
       res.end("Forbidden")
     }
-  } else if (req.method === "POST" && new URL(req.url || "/", `http://${req.headers.host || "localhost"}`).pathname === "/webhook") {
+  } else if (req.method === "POST" && pathname === "/webhook") {
     let body = ""
 
     req.on("data", (chunk: string) => {
@@ -884,15 +893,14 @@ const server = http.createServer(async (req, res) => {
       })
       res.end(JSON.stringify({ status: "EVENT_RECEIVED" }))
     })
-  } else if ((req.method === "GET" || req.method === "DELETE") && req.url && req.url.startsWith("/api/conversations")) {
+  } else if ((req.method === "GET" || req.method === "DELETE") && pathname.startsWith("/api/conversations")) {
     const user = getSessionUser(req.headers.cookie)
     if (!user) {
       respondJson(res, 401, { error: "Not authenticated" })
       return
     }
 
-    const url = new URL(req.url, `http://${req.headers.host || "localhost"}`)
-    const parts = url.pathname.split("/").filter(Boolean)
+    const parts = pathname.split("/").filter(Boolean)
 
     if (req.method === "GET" && parts.length === 2) {
       const conversations = listConversationsForUser(user.id)
@@ -926,7 +934,6 @@ const server = http.createServer(async (req, res) => {
 
     respondJson(res, 404, { error: "Not found" })
   } else if (req.method === "GET") {
-    const pathname = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`).pathname
     const staticFile = STATIC_FILES[pathname]
 
     if (staticFile) {
@@ -957,10 +964,16 @@ const server = http.createServer(async (req, res) => {
 
     res.end("Not found")
   }
-})
+}
+
+const server = http.createServer(handleRequest)
 
 const PORT = process.env.PORT || 3000
 
-server.listen(PORT, () => {
-  console.log(`AI Agent running on port ${PORT}`)
-})
+if (!process.env.VERCEL) {
+  server.listen(PORT, () => {
+    console.log(`AI Agent running on port ${PORT}`)
+  })
+}
+
+export default handleRequest

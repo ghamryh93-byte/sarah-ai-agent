@@ -2,7 +2,9 @@ import fs from "fs"
 import path from "path"
 import crypto from "crypto"
 
-const DATA_DIR = path.join(__dirname, "..", "data")
+const DATA_DIR = process.env.VERCEL
+  ? path.join("/tmp", "data")
+  : (process.env.DATA_DIR || path.join(__dirname, "..", "data"))
 const CONVERSATIONS_DIR = path.join(DATA_DIR, "conversations")
 const USERS_FILE = path.join(DATA_DIR, "users.json")
 const SESSIONS_FILE = path.join(DATA_DIR, "sessions.json")
