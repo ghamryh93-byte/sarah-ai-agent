@@ -28,7 +28,8 @@
 
     var init = {
       method: options.method || "GET",
-      headers: { "Content-Type": "application/json" }
+      headers: { "Content-Type": "application/json" },
+      credentials: "include"
     }
 
     if (options.body !== undefined) {

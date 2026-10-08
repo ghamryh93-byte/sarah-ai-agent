@@ -141,11 +141,13 @@ export function revokeSessionByCookie(cookieHeader: string | undefined): boolean
 }
 
 export function sessionCookieHeader(token: string): string {
-  return `${SESSION_COOKIE_NAME}=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${Math.floor(SESSION_LIFETIME_MS / 1000)}`
+  const isSecure = process.env.VERCEL || process.env.NODE_ENV === "production"
+  return `${SESSION_COOKIE_NAME}=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${Math.floor(SESSION_LIFETIME_MS / 1000)}${isSecure ? "; Secure" : ""}`
 }
 
 export function clearSessionCookieHeader(): string {
-  return `${SESSION_COOKIE_NAME}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0`
+  const isSecure = process.env.VERCEL || process.env.NODE_ENV === "production"
+  return `${SESSION_COOKIE_NAME}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0${isSecure ? "; Secure" : ""}`
 }
 
 export type PublicUser = {

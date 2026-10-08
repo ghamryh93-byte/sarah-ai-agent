@@ -334,14 +334,14 @@
     app.$("userName").textContent = app.state.user.fullName
     app.$("userEmail").textContent = app.state.user.email
 
-    var adminLink = app.$("adminDashboardLink")
-    if (adminLink) {
-      if (app.state.user.isAdmin) {
-        app.show(adminLink)
-      } else {
-        app.hide(adminLink)
+    var isAdmin = Boolean(app.state.user && app.state.user.isAdmin)
+    var adminEls = [app.$("adminDashboardLink"), app.$("sidebarAdminBtn"), app.$("headerAdminBtn")]
+    adminEls.forEach(function (el) {
+      if (el) {
+        if (isAdmin) app.show(el)
+        else app.hide(el)
       }
-    }
+    })
 
     app.useSarahImage(app.$("sidebarSarahImg"), app.$("sidebarSarahFallback"))
     app.useSarahImage(app.$("welcomeSarahImg"), app.$("welcomeSarahFallback"))

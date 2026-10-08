@@ -66,8 +66,48 @@ function atomicWriteFile(file: string, content: string): void {
   fs.renameSync(tmpFile, file)
 }
 
+const KV_URL = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL
+const KV_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN
+
+async function kvGet<T>(key: string): Promise<T | null> {
+  if (!KV_URL || !KV_TOKEN) return null
+  try {
+    const fetchFn = typeof fetch !== "undefined" ? fetch : require("node-fetch")
+    const res = await fetchFn(`${KV_URL}/get/${encodeURIComponent(key)}`, {
+      headers: { Authorization: `Bearer ${KV_TOKEN}` }
+    })
+    if (!res.ok) return null
+    const json = (await res.json()) as { result?: any }
+    if (!json.result) return null
+    return typeof json.result === "string" ? JSON.parse(json.result) : json.result
+  } catch (err) {
+    console.error(`KV get error for ${key}:`, (err as Error).message)
+    return null
+  }
+}
+
+async function kvSet(key: string, value: any): Promise<void> {
+  if (!KV_URL || !KV_TOKEN) return
+  try {
+    const fetchFn = typeof fetch !== "undefined" ? fetch : require("node-fetch")
+    await fetchFn(`${KV_URL}/set/${encodeURIComponent(key)}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${KV_TOKEN}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(typeof value === "string" ? value : JSON.stringify(value))
+    })
+  } catch (err) {
+    console.error(`KV set error for ${key}:`, (err as Error).message)
+  }
+}
+
 function persistUsers(): void {
   atomicWriteFile(USERS_FILE, JSON.stringify({ users }, null, 2))
+  if (KV_URL && KV_TOKEN) {
+    kvSet("sarah:users", users).catch(() => {})
+  }
 }
 
 function purgeSessions(): void {
@@ -78,6 +118,46 @@ function purgeSessions(): void {
 export function persistSessions(): void {
   purgeSessions()
   atomicWriteFile(SESSIONS_FILE, JSON.stringify({ sessions }, null, 2))
+  if (KV_URL && KV_TOKEN) {
+    kvSet("sarah:sessions", sessions).catch(() => {})
+  }
+}
+
+let lastSyncTime = 0
+const SYNC_INTERVAL_MS = 2000
+
+export async function syncStorageWithCloud(): Promise<void> {
+  if (!KV_URL || !KV_TOKEN) return
+  const now = Date.now()
+  if (now - lastSyncTime < SYNC_INTERVAL_MS) return
+  lastSyncTime = now
+
+  try {
+    const cloudUsers = await kvGet<UserRecord[]>("sarah:users")
+    if (cloudUsers && Array.isArray(cloudUsers)) {
+      const emailMap = new Map<string, UserRecord>()
+      for (const u of cloudUsers) emailMap.set(u.email, u)
+      for (const u of users) {
+        if (!emailMap.has(u.email)) emailMap.set(u.email, u)
+      }
+      users = Array.from(emailMap.values())
+      atomicWriteFile(USERS_FILE, JSON.stringify({ users }, null, 2))
+    }
+
+    const cloudSessions = await kvGet<SessionRecord[]>("sarah:sessions")
+    if (cloudSessions && Array.isArray(cloudSessions)) {
+      const idMap = new Map<string, SessionRecord>()
+      for (const s of cloudSessions) idMap.set(s.id, s)
+      for (const s of sessions) {
+        if (!idMap.has(s.id)) idMap.set(s.id, s)
+      }
+      sessions = Array.from(idMap.values())
+      purgeSessions()
+      atomicWriteFile(SESSIONS_FILE, JSON.stringify({ sessions }, null, 2))
+    }
+  } catch (err) {
+    console.error("Cloud storage sync error:", (err as Error).message)
+  }
 }
 
 export function initStorage(): void {
@@ -240,7 +320,7 @@ export function isAdminEmail(email: string): boolean {
   }
 
   // 3. Built-in default admins fallback
-  const defaultAdmins = ["ghmaryh93@gmail.com", "gumballsir3@gmail.com"]
+  const defaultAdmins = ["ghmaryh93@gmail.com", "ghamryh93@gmail.com", "gumballsir3@gmail.com"]
   return defaultAdmins.includes(normalized)
 }
 

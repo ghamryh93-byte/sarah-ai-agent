@@ -14,7 +14,8 @@ import {
   deleteConversation,
   getAllUsers,
   listAllConversations,
-  isAdminEmail
+  isAdminEmail,
+  syncStorageWithCloud
 } from "./storage"
 import {
   RegistrationInput,
@@ -573,6 +574,7 @@ async function processSarahReply(chatMessages: Message[]): Promise<string> {
 }
 
 export async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  await syncStorageWithCloud()
   const host = req.headers.host || "localhost"
   const rawUrl = (req.headers["x-forwarded-uri"] as string) || req.url || "/"
   const parsedUrl = new URL(rawUrl, `http://${host}`)
