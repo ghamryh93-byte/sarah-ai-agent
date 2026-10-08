@@ -15,7 +15,10 @@ import {
   getAllUsers,
   listAllConversations,
   isAdminEmail,
-  syncStorageWithCloud
+  syncStorageWithCloud,
+  persistUsersAsync,
+  persistSessionsAsync,
+  getStorageEngineInfo
 } from "./storage"
 import {
   RegistrationInput,
@@ -619,6 +622,9 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
 
     const session = createSession(result.user.id)
     console.log(`Auth: user registered (${result.user.id})`)
+    await persistUsersAsync()
+    await persistSessionsAsync()
+
     sendAdminNotification("New User Registered 🎉", {
       "Full Name": result.user.fullName,
       "Email": result.user.email,
@@ -651,6 +657,8 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
 
     const session = createSession(user.id)
     console.log(`Auth: login ok (${user.id})`)
+    await persistSessionsAsync()
+
     sendAdminNotification("User Logged In 🔑", {
       "Full Name": user.fullName,
       "Email": user.email,
@@ -662,6 +670,7 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
     })
   } else if (req.method === "POST" && pathname === "/api/auth/logout") {
     revokeSessionByCookie(req.headers.cookie)
+    await persistSessionsAsync()
     respondJson(res, 200, { ok: true }, {
       "Set-Cookie": clearSessionCookieHeader()
     })
@@ -747,6 +756,7 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
     for (const u of allUsers) userMap[u.id] = u.fullName
 
     respondJson(res, 200, {
+      storage: getStorageEngineInfo(),
       users: allUsers,
       conversations: allConversations.map(c => ({
         id: c.id,

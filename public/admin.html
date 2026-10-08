@@ -224,8 +224,15 @@
     </div>
   </div>
 
-  <div class="content">
     <div id="error-msg"></div>
+
+    <!-- Storage Status Banner -->
+    <div id="storage-alert" style="margin-bottom:24px;padding:12px 18px;border-radius:12px;display:flex;align-items:center;justify-content:space-between;font-size:0.88rem;background:rgba(61,214,140,0.1);border:1px solid rgba(61,214,140,0.3);color:#3dd68c;">
+      <div>
+        <strong>Database Status:</strong> <span id="storage-engine-name">Checking...</span>
+      </div>
+      <div id="storage-status-tag" style="font-weight:600;font-size:0.8rem;padding:3px 10px;border-radius:20px;background:rgba(61,214,140,0.2);">Connected</div>
+    </div>
 
     <!-- Stats -->
     <div class="stats">
@@ -364,6 +371,28 @@
   function processData(data) {
     allUsers = data.users || []
     allConvs = data.conversations || []
+
+    if (data.storage) {
+      var sName = document.getElementById('storage-engine-name')
+      var sTag = document.getElementById('storage-status-tag')
+      var sBox = document.getElementById('storage-alert')
+      if (sName && sTag && sBox) {
+        sName.textContent = data.storage.engine
+        if (data.storage.connected) {
+          sTag.textContent = '🟢 Connected & Permanent'
+          sTag.style.background = 'rgba(61,214,140,0.2)'
+          sBox.style.background = 'rgba(61,214,140,0.1)'
+          sBox.style.borderColor = 'rgba(61,214,140,0.3)'
+          sBox.style.color = '#3dd68c'
+        } else {
+          sTag.textContent = '⚠️ Ephemeral (Storage Token Not Found)'
+          sTag.style.background = 'rgba(240,160,53,0.2)'
+          sBox.style.background = 'rgba(240,160,53,0.1)'
+          sBox.style.borderColor = 'rgba(240,160,53,0.3)'
+          sBox.style.color = '#f0a035'
+        }
+      }
+    }
 
     // Stats
     document.getElementById('stat-users').textContent = allUsers.length

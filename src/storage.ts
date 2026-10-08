@@ -1,7 +1,7 @@
 import fs from "fs"
 import path from "path"
 import crypto from "crypto"
-import { put, get } from "@vercel/blob"
+import { put, list } from "@vercel/blob"
 
 const DATA_DIR = process.env.VERCEL
   ? path.join("/tmp", "data")
@@ -72,36 +72,46 @@ const KV_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST
 const HAS_BLOB = Boolean(process.env.BLOB_READ_WRITE_TOKEN)
 
 async function blobGet<T>(pathname: string): Promise<T | null> {
-  if (!process.env.BLOB_READ_WRITE_TOKEN) return null
+  const token = process.env.BLOB_READ_WRITE_TOKEN
+  if (!token) return null
   try {
-    const res = await get(pathname, { access: "public", useCache: false })
-    if (!res || !res.stream) return null
-    const reader = res.stream.getReader()
-    const chunks: Uint8Array[] = []
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      if (value) chunks.push(value)
-    }
-    const text = Buffer.concat(chunks).toString("utf8")
-    return JSON.parse(text) as T
-  } catch {
+    const { blobs } = await list({ prefix: pathname, token })
+    if (!blobs || blobs.length === 0) return null
+    const exact = blobs.find((b: any) => b.pathname === pathname) || blobs[0]
+    const fetchFn = typeof fetch !== "undefined" ? fetch : require("node-fetch")
+    const res = await fetchFn(`${exact.url}?t=${Date.now()}`)
+    if (!res.ok) return null
+    return (await res.json()) as T
+  } catch (err) {
+    console.error(`Blob read error for ${pathname}:`, (err as Error).message)
     return null
   }
 }
 
 async function blobSet(pathname: string, data: any): Promise<void> {
-  if (!process.env.BLOB_READ_WRITE_TOKEN) return
+  const token = process.env.BLOB_READ_WRITE_TOKEN
+  if (!token) return
   try {
     await put(pathname, JSON.stringify(data), {
       access: "public",
       addRandomSuffix: false,
       allowOverwrite: true,
-      contentType: "application/json"
+      contentType: "application/json",
+      token
     })
   } catch (err) {
     console.error(`Blob write error for ${pathname}:`, (err as Error).message)
   }
+}
+
+export function getStorageEngineInfo(): { engine: string; connected: boolean } {
+  if (process.env.BLOB_READ_WRITE_TOKEN) {
+    return { engine: "Vercel Blob", connected: true }
+  }
+  if (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL) {
+    return { engine: "Vercel KV / Upstash Redis", connected: true }
+  }
+  return { engine: "Local Ephemeral (No Persistent Database Connected)", connected: false }
 }
 
 async function kvGet<T>(key: string): Promise<T | null> {
@@ -138,14 +148,19 @@ async function kvSet(key: string, value: any): Promise<void> {
   }
 }
 
-function persistUsers(): void {
+export async function persistUsersAsync(): Promise<void> {
   atomicWriteFile(USERS_FILE, JSON.stringify({ users }, null, 2))
   if (KV_URL && KV_TOKEN) {
-    kvSet("sarah:users", users).catch(() => {})
+    await kvSet("sarah:users", users).catch(() => {})
   }
-  if (HAS_BLOB) {
-    blobSet("data/users.json", users).catch(() => {})
+  if (process.env.BLOB_READ_WRITE_TOKEN) {
+    await blobSet("data/users.json", users).catch(() => {})
   }
+}
+
+function persistUsers(): void {
+  atomicWriteFile(USERS_FILE, JSON.stringify({ users }, null, 2))
+  persistUsersAsync().catch(() => {})
 }
 
 function purgeSessions(): void {
@@ -153,15 +168,21 @@ function purgeSessions(): void {
   sessions = sessions.filter(s => s.revokedAt === null && s.expiresAt > cutoff)
 }
 
-export function persistSessions(): void {
+export async function persistSessionsAsync(): Promise<void> {
   purgeSessions()
   atomicWriteFile(SESSIONS_FILE, JSON.stringify({ sessions }, null, 2))
   if (KV_URL && KV_TOKEN) {
-    kvSet("sarah:sessions", sessions).catch(() => {})
+    await kvSet("sarah:sessions", sessions).catch(() => {})
   }
-  if (HAS_BLOB) {
-    blobSet("data/sessions.json", sessions).catch(() => {})
+  if (process.env.BLOB_READ_WRITE_TOKEN) {
+    await blobSet("data/sessions.json", sessions).catch(() => {})
   }
+}
+
+export function persistSessions(): void {
+  purgeSessions()
+  atomicWriteFile(SESSIONS_FILE, JSON.stringify({ sessions }, null, 2))
+  persistSessionsAsync().catch(() => {})
 }
 
 let lastSyncTime = 0
