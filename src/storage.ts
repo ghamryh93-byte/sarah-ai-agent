@@ -1,6 +1,7 @@
 import fs from "fs"
 import path from "path"
 import crypto from "crypto"
+import { put, get } from "@vercel/blob"
 
 const DATA_DIR = process.env.VERCEL
   ? path.join("/tmp", "data")
@@ -68,6 +69,40 @@ function atomicWriteFile(file: string, content: string): void {
 
 const KV_URL = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL
 const KV_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN
+const HAS_BLOB = Boolean(process.env.BLOB_READ_WRITE_TOKEN)
+
+async function blobGet<T>(pathname: string): Promise<T | null> {
+  if (!process.env.BLOB_READ_WRITE_TOKEN) return null
+  try {
+    const res = await get(pathname, { access: "public", useCache: false })
+    if (!res || !res.stream) return null
+    const reader = res.stream.getReader()
+    const chunks: Uint8Array[] = []
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (value) chunks.push(value)
+    }
+    const text = Buffer.concat(chunks).toString("utf8")
+    return JSON.parse(text) as T
+  } catch {
+    return null
+  }
+}
+
+async function blobSet(pathname: string, data: any): Promise<void> {
+  if (!process.env.BLOB_READ_WRITE_TOKEN) return
+  try {
+    await put(pathname, JSON.stringify(data), {
+      access: "public",
+      addRandomSuffix: false,
+      allowOverwrite: true,
+      contentType: "application/json"
+    })
+  } catch (err) {
+    console.error(`Blob write error for ${pathname}:`, (err as Error).message)
+  }
+}
 
 async function kvGet<T>(key: string): Promise<T | null> {
   if (!KV_URL || !KV_TOKEN) return null
@@ -108,6 +143,9 @@ function persistUsers(): void {
   if (KV_URL && KV_TOKEN) {
     kvSet("sarah:users", users).catch(() => {})
   }
+  if (HAS_BLOB) {
+    blobSet("data/users.json", users).catch(() => {})
+  }
 }
 
 function purgeSessions(): void {
@@ -121,19 +159,29 @@ export function persistSessions(): void {
   if (KV_URL && KV_TOKEN) {
     kvSet("sarah:sessions", sessions).catch(() => {})
   }
+  if (HAS_BLOB) {
+    blobSet("data/sessions.json", sessions).catch(() => {})
+  }
 }
 
 let lastSyncTime = 0
 const SYNC_INTERVAL_MS = 2000
 
 export async function syncStorageWithCloud(): Promise<void> {
-  if (!KV_URL || !KV_TOKEN) return
+  const hasCloud = Boolean((KV_URL && KV_TOKEN) || HAS_BLOB)
+  if (!hasCloud) return
   const now = Date.now()
   if (now - lastSyncTime < SYNC_INTERVAL_MS) return
   lastSyncTime = now
 
   try {
-    const cloudUsers = await kvGet<UserRecord[]>("sarah:users")
+    let cloudUsers: UserRecord[] | null = null
+    if (HAS_BLOB) {
+      cloudUsers = await blobGet<UserRecord[]>("data/users.json")
+    } else if (KV_URL && KV_TOKEN) {
+      cloudUsers = await kvGet<UserRecord[]>("sarah:users")
+    }
+
     if (cloudUsers && Array.isArray(cloudUsers)) {
       const emailMap = new Map<string, UserRecord>()
       for (const u of cloudUsers) emailMap.set(u.email, u)
@@ -144,7 +192,13 @@ export async function syncStorageWithCloud(): Promise<void> {
       atomicWriteFile(USERS_FILE, JSON.stringify({ users }, null, 2))
     }
 
-    const cloudSessions = await kvGet<SessionRecord[]>("sarah:sessions")
+    let cloudSessions: SessionRecord[] | null = null
+    if (HAS_BLOB) {
+      cloudSessions = await blobGet<SessionRecord[]>("data/sessions.json")
+    } else if (KV_URL && KV_TOKEN) {
+      cloudSessions = await kvGet<SessionRecord[]>("sarah:sessions")
+    }
+
     if (cloudSessions && Array.isArray(cloudSessions)) {
       const idMap = new Map<string, SessionRecord>()
       for (const s of cloudSessions) idMap.set(s.id, s)
