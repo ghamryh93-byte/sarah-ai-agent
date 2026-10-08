@@ -3,7 +3,7 @@ import http from "http"
 import fs from "fs"
 import path from "path"
 import { NVIDIAClient, GeminiClient } from "./ai"
-import { isMailerConfigured, sendInterestEmail, sendPasswordResetCode, InterestApplication } from "./mailer"
+import { isMailerConfigured, sendInterestEmail, sendPasswordResetCode, sendAdminNotification, InterestApplication } from "./mailer"
 import {
   ConversationRecord,
   findUserByEmail,
@@ -11,7 +11,10 @@ import {
   listConversationsForUser,
   readConversation,
   writeConversation,
-  deleteConversation
+  deleteConversation,
+  getAllUsers,
+  listAllConversations,
+  isAdminEmail
 } from "./storage"
 import {
   RegistrationInput,
@@ -417,7 +420,9 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
   "/auth.js": { file: "auth.js", type: "text/javascript; charset=utf-8" },
   "/chat.js": { file: "chat.js", type: "text/javascript; charset=utf-8" },
   "/sarah.png": { file: "sarah.png", type: "image/png" },
-  "/favicon.svg": { file: "favicon.svg", type: "image/svg+xml" }
+  "/favicon.svg": { file: "favicon.svg", type: "image/svg+xml" },
+  "/admin": { file: "admin.html", type: "text/html; charset=utf-8" },
+  "/admin.html": { file: "admin.html", type: "text/html; charset=utf-8" }
 }
 
 const MAX_BODY_BYTES = 100 * 1024
@@ -612,7 +617,14 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
 
     const session = createSession(result.user.id)
     console.log(`Auth: user registered (${result.user.id})`)
-    respondJson(res, 201, { user: toPublicUser(result.user) }, {
+    sendAdminNotification("New User Registered 🎉", {
+      "Full Name": result.user.fullName,
+      "Email": result.user.email,
+      "User ID": result.user.id,
+      "Registered At": result.user.createdAt
+    }).catch(() => {})
+
+    respondJson(res, 201, { user: { ...toPublicUser(result.user), isAdmin: isAdminEmail(result.user.email) } }, {
       "Set-Cookie": sessionCookieHeader(session.token)
     })
   } else if (req.method === "POST" && pathname === "/api/auth/login") {
@@ -637,7 +649,13 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
 
     const session = createSession(user.id)
     console.log(`Auth: login ok (${user.id})`)
-    respondJson(res, 200, { user: toPublicUser(user) }, {
+    sendAdminNotification("User Logged In 🔑", {
+      "Full Name": user.fullName,
+      "Email": user.email,
+      "User ID": user.id
+    }).catch(() => {})
+
+    respondJson(res, 200, { user: { ...toPublicUser(user), isAdmin: isAdminEmail(user.email) } }, {
       "Set-Cookie": sessionCookieHeader(session.token)
     })
   } else if (req.method === "POST" && pathname === "/api/auth/logout") {
@@ -651,7 +669,7 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       respondJson(res, 401, { error: "Not authenticated" })
       return
     }
-    respondJson(res, 200, { user: toPublicUser(user) })
+    respondJson(res, 200, { user: { ...toPublicUser(user), isAdmin: isAdminEmail(user.email) } })
   } else if (req.method === "POST" && pathname === "/api/auth/forgot-password") {
     const bodyResult = await readJsonBody(req)
     if (!bodyResult.ok) {
@@ -715,6 +733,29 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
     } else {
       respondJson(res, 400, { error: "The reset code is invalid or has expired." })
     }
+  } else if (req.method === "GET" && pathname === "/api/admin/data") {
+    const user = getSessionUser(req.headers.cookie)
+    if (!user || !isAdminEmail(user.email)) {
+      respondJson(res, 403, { error: "Forbidden: Admins only." })
+      return
+    }
+    const allUsers = getAllUsers()
+    const allConversations = listAllConversations()
+    const userMap: Record<string, string> = {}
+    for (const u of allUsers) userMap[u.id] = u.fullName
+
+    respondJson(res, 200, {
+      users: allUsers,
+      conversations: allConversations.map(c => ({
+        id: c.id,
+        title: c.title,
+        userId: c.userId,
+        userName: userMap[c.userId] || "Unknown",
+        createdAt: c.createdAt,
+        updatedAt: c.updatedAt,
+        messageCount: c.messages.length
+      }))
+    })
   } else if (req.method === "POST" && pathname === "/api/conversations") {
     const user = getSessionUser(req.headers.cookie)
     if (!user) {

@@ -88,7 +88,39 @@ export async function sendInterestEmail(application: InterestApplication): Promi
   await transporter.sendMail({
     from: process.env.SMTP_USER,
     to,
-    subject,
+    subject: `New YSC Interest/Application - ${application.fullName} - ${application.request}`,
     text: lines.join("\n")
   })
+}
+
+export async function sendAdminNotification(
+  subject: string,
+  details: Record<string, string | undefined>
+): Promise<void> {
+  if (!isMailerConfigured()) return
+
+  try {
+    const transporter = createTransporter()
+    const to = process.env.ADMIN_EMAILS || "ghmaryh93@gmail.com, gumballsir3@gmail.com"
+
+    const bodyLines = Object.entries(details)
+      .filter(([_, val]) => Boolean(val))
+      .map(([key, val]) => `• ${key}: ${val}`)
+
+    await transporter.sendMail({
+      from: process.env.SMTP_USER,
+      to,
+      subject: `[YSC Sarah] ${subject}`,
+      text: [
+        `Notification from YSC Sarah Platform:`,
+        ``,
+        ...bodyLines,
+        ``,
+        `Timestamp: ${new Date().toLocaleString("en-GB")}`,
+        `Dashboard: https://sarah-ai-agent-main.vercel.app/admin`
+      ].join("\n")
+    })
+  } catch (err) {
+    console.error("Failed to send admin notification email:", (err as Error).message)
+  }
 }

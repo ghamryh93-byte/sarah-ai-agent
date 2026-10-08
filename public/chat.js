@@ -334,6 +334,15 @@
     app.$("userName").textContent = app.state.user.fullName
     app.$("userEmail").textContent = app.state.user.email
 
+    var adminLink = app.$("adminDashboardLink")
+    if (adminLink) {
+      if (app.state.user.isAdmin) {
+        app.show(adminLink)
+      } else {
+        app.hide(adminLink)
+      }
+    }
+
     app.useSarahImage(app.$("sidebarSarahImg"), app.$("sidebarSarahFallback"))
     app.useSarahImage(app.$("welcomeSarahImg"), app.$("welcomeSarahFallback"))
 

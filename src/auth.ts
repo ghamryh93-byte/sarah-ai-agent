@@ -152,6 +152,7 @@ export type PublicUser = {
   id: string
   fullName: string
   email: string
+  isAdmin?: boolean
 }
 
 export function toPublicUser(user: UserRecord): PublicUser {

@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>YSC Sarah – Admin Dashboard</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0a0a0f;
+      --surface: #111118;
+      --card: #16161f;
+      --border: #1e1e2e;
+      --accent: #7c6df0;
+      --accent2: #5b8dee;
+      --danger: #f04f6a;
+      --success: #3dd68c;
+      --warn: #f0a035;
+      --text: #e8e8f0;
+      --muted: #6b6b85;
+      --subtle: #2a2a3d;
+    }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    /* ── ACCESS GATE ── */
+    #gate {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      background: radial-gradient(ellipse at 50% 0%, #1a1030 0%, var(--bg) 70%);
+    }
+    #gate-box {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 48px 40px;
+      text-align: center;
+      max-width: 380px;
+      width: 90%;
+      animation: fadeUp .4s ease;
+    }
+    #gate-box h1 { font-size: 1.6rem; font-weight: 700; margin-bottom: 8px; }
+    #gate-box p  { color: var(--muted); font-size: .9rem; margin-bottom: 28px; }
+    #gate-error  { color: var(--danger); font-size: .85rem; margin-top: 14px; display: none; }
+
+    /* ── SHELL ── */
+    #shell { display: none; }
+
+    /* ── TOPBAR ── */
+    .topbar {
+      position: sticky; top: 0; z-index: 100;
+      background: rgba(17,17,24,.85);
+      backdrop-filter: blur(14px);
+      border-bottom: 1px solid var(--border);
+      padding: 0 32px;
+      display: flex; align-items: center; justify-content: space-between;
+      height: 60px;
+    }
+    .topbar-brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 1.05rem; }
+    .topbar-brand span { color: var(--accent); }
+    .topbar-info { color: var(--muted); font-size: .8rem; display: flex; align-items: center; gap: 14px; }
+    .admin-badge {
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      color: #fff; font-size: .72rem; font-weight: 600;
+      padding: 3px 10px; border-radius: 20px; letter-spacing: .04em;
+    }
+    .btn-logout {
+      background: none; border: 1px solid var(--border); color: var(--muted);
+      padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: .8rem;
+      transition: .2s;
+    }
+    .btn-logout:hover { border-color: var(--danger); color: var(--danger); }
+
+    /* ── LAYOUT ── */
+    .content { max-width: 1200px; margin: 0 auto; padding: 36px 24px; }
+
+    /* ── STATS ROW ── */
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 36px; }
+    .stat-card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 14px; padding: 22px 24px;
+      transition: border-color .2s;
+    }
+    .stat-card:hover { border-color: var(--accent); }
+    .stat-label { font-size: .75rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 10px; }
+    .stat-value { font-size: 2rem; font-weight: 700; }
+    .stat-value.purple { color: var(--accent); }
+    .stat-value.blue   { color: var(--accent2); }
+    .stat-value.green  { color: var(--success); }
+    .stat-value.orange { color: var(--warn); }
+
+    /* ── SECTION ── */
+    .section { margin-bottom: 40px; }
+    .section-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 16px;
+    }
+    .section-title { font-size: 1.05rem; font-weight: 600; }
+    .section-count {
+      background: var(--subtle); color: var(--muted);
+      font-size: .75rem; padding: 3px 10px; border-radius: 20px;
+    }
+
+    /* ── SEARCH ── */
+    .search-wrap { position: relative; margin-bottom: 14px; }
+    .search-wrap svg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); opacity: .4; }
+    .search-input {
+      width: 100%; padding: 10px 14px 10px 38px;
+      background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+      color: var(--text); font-size: .88rem; outline: none;
+      transition: border-color .2s;
+    }
+    .search-input:focus { border-color: var(--accent); }
+
+    /* ── TABLE ── */
+    .table-wrap {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 14px; overflow: hidden;
+    }
+    table { width: 100%; border-collapse: collapse; }
+    thead th {
+      text-align: left; padding: 13px 18px;
+      font-size: .72rem; text-transform: uppercase; letter-spacing: .07em;
+      color: var(--muted); background: var(--surface);
+      border-bottom: 1px solid var(--border);
+    }
+    tbody tr { transition: background .15s; }
+    tbody tr:hover { background: var(--subtle); }
+    tbody tr + tr td { border-top: 1px solid var(--border); }
+    td { padding: 13px 18px; font-size: .86rem; vertical-align: middle; }
+    .td-id { font-family: monospace; font-size: .75rem; color: var(--muted); }
+    .td-name { font-weight: 500; }
+    .td-email { color: var(--accent2); }
+    .td-date { color: var(--muted); font-size: .8rem; }
+    .td-count {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-width: 26px; height: 22px; padding: 0 8px;
+      background: var(--subtle); border-radius: 6px;
+      font-size: .78rem; font-weight: 600; color: var(--accent);
+    }
+    .empty-row td { text-align: center; padding: 40px; color: var(--muted); }
+
+    /* ── BADGE ── */
+    .badge {
+      display: inline-block; font-size: .7rem; padding: 2px 8px;
+      border-radius: 5px; font-weight: 600;
+    }
+    .badge-admin { background: #2d1f5e; color: var(--accent); }
+
+    /* ── LOADING / ERROR ── */
+    #loading-overlay {
+      position: fixed; inset: 0; background: var(--bg);
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 16px; z-index: 200; transition: opacity .3s;
+    }
+    .spinner {
+      width: 40px; height: 40px; border-radius: 50%;
+      border: 3px solid var(--border);
+      border-top-color: var(--accent);
+      animation: spin .7s linear infinite;
+    }
+    #error-msg {
+      display: none; background: #2a0f18; border: 1px solid var(--danger);
+      color: var(--danger); border-radius: 12px; padding: 18px 24px;
+      margin-bottom: 24px; font-size: .9rem;
+    }
+
+    /* ── REFRESH BTN ── */
+    .btn-refresh {
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      color: #fff; border: none; border-radius: 9px;
+      padding: 8px 18px; font-size: .84rem; font-weight: 600;
+      cursor: pointer; transition: opacity .2s;
+    }
+    .btn-refresh:hover { opacity: .85; }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes fadeUp { from { opacity:0; transform:translateY(16px); } to { opacity:1; transform:none; } }
+
+    @media (max-width: 640px) {
+      .topbar { padding: 0 16px; }
+      .content { padding: 24px 12px; }
+      thead th:nth-child(n+4), td:nth-child(n+4) { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── GATE ── -->
+<div id="gate">
+  <div id="gate-box">
+    <h1>🔐 Admin Access</h1>
+    <p>You must be signed in with an authorised admin email to view this page.</p>
+    <button class="btn-refresh" id="gate-btn" onclick="checkAccess()">Check Access</button>
+    <div id="gate-error"></div>
+  </div>
+</div>
+
+<!-- ── LOADING ── -->
+<div id="loading-overlay">
+  <div class="spinner"></div>
+  <div style="color:var(--muted);font-size:.9rem;">Loading dashboard…</div>
+</div>
+
+<!-- ── SHELL ── -->
+<div id="shell">
+  <div class="topbar">
+    <div class="topbar-brand">
+      🛡️ <span>YSC</span>&nbsp;Admin Dashboard
+    </div>
+    <div class="topbar-info">
+      <span id="admin-email-label" style="color:var(--text)"></span>
+      <span class="admin-badge">ADMIN</span>
+      <button class="btn-logout" onclick="logout()">Sign out</button>
+    </div>
+  </div>
+
+  <div class="content">
+    <div id="error-msg"></div>
+
+    <!-- Stats -->
+    <div class="stats">
+      <div class="stat-card">
+        <div class="stat-label">Total Users</div>
+        <div class="stat-value purple" id="stat-users">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Conversations</div>
+        <div class="stat-value blue" id="stat-convs">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Total Messages</div>
+        <div class="stat-value green" id="stat-msgs">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Last Updated</div>
+        <div class="stat-value orange" style="font-size:1.1rem" id="stat-time">—</div>
+      </div>
+    </div>
+
+    <!-- Users -->
+    <div class="section">
+      <div class="section-header">
+        <div class="section-title">👤 Registered Users</div>
+        <div style="display:flex;gap:10px;align-items:center">
+          <span class="section-count" id="user-count">0</span>
+          <button class="btn-refresh" onclick="loadData()">↻ Refresh</button>
+        </div>
+      </div>
+      <div class="search-wrap">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+        </svg>
+        <input class="search-input" id="user-search" type="text" placeholder="Search by name or email…" oninput="filterUsers()" />
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Full Name</th>
+              <th>Email</th>
+              <th>User ID</th>
+              <th>Registered</th>
+              <th>Chats</th>
+            </tr>
+          </thead>
+          <tbody id="users-body">
+            <tr class="empty-row"><td colspan="6">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Conversations -->
+    <div class="section">
+      <div class="section-header">
+        <div class="section-title">💬 All Conversations</div>
+        <span class="section-count" id="conv-count">0</span>
+      </div>
+      <div class="search-wrap">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+        </svg>
+        <input class="search-input" id="conv-search" type="text" placeholder="Search by title or user name…" oninput="filterConvs()" />
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Title</th>
+              <th>User</th>
+              <th>Messages</th>
+              <th>Created</th>
+              <th>Last Active</th>
+            </tr>
+          </thead>
+          <tbody id="convs-body">
+            <tr class="empty-row"><td colspan="6">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  let allUsers = []
+  let allConvs = []
+
+  function fmt(iso) {
+    if (!iso) return '—'
+    const d = new Date(iso)
+    return d.toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'numeric' }) +
+      ' ' + d.toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit' })
+  }
+
+  async function checkAccess() {
+    document.getElementById('gate-error').style.display = 'none'
+    document.getElementById('gate-btn').textContent = 'Checking…'
+    try {
+      const res = await fetch('/api/auth/me', { credentials: 'include' })
+      if (!res.ok) throw new Error('not_logged_in')
+      const { user } = await res.json()
+      // Try admin endpoint
+      const adminRes = await fetch('/api/admin/data', { credentials: 'include' })
+      if (adminRes.status === 403) throw new Error('not_admin')
+      if (!adminRes.ok) throw new Error('server_error')
+      document.getElementById('admin-email-label').textContent = user.email
+      document.getElementById('gate').style.display = 'none'
+      document.getElementById('shell').style.display = 'block'
+      document.getElementById('loading-overlay').style.display = 'none'
+      processData(await adminRes.json())
+    } catch(e) {
+      document.getElementById('gate-btn').textContent = 'Check Access'
+      const el = document.getElementById('gate-error')
+      el.style.display = 'block'
+      if (e.message === 'not_logged_in') el.textContent = '⚠️ You are not logged in. Please log in on the main site first.'
+      else if (e.message === 'not_admin') el.textContent = '🚫 Your account does not have admin access.'
+      else el.textContent = '❌ Server error. Try again.'
+    }
+  }
+
+  async function loadData() {
+    try {
+      const res = await fetch('/api/admin/data', { credentials: 'include' })
+      if (!res.ok) throw new Error('fetch_failed')
+      processData(await res.json())
+    } catch {
+      showError('Failed to refresh data.')
+    }
+  }
+
+  function processData(data) {
+    allUsers = data.users || []
+    allConvs = data.conversations || []
+
+    // Stats
+    document.getElementById('stat-users').textContent = allUsers.length
+    document.getElementById('stat-convs').textContent = allConvs.length
+    const totalMsgs = allConvs.reduce((s, c) => s + (c.messageCount || 0), 0)
+    document.getElementById('stat-msgs').textContent = totalMsgs
+    document.getElementById('stat-time').textContent = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
+
+    // Conv map for user row
+    const convsByUser = {}
+    for (const c of allConvs) {
+      convsByUser[c.userId] = (convsByUser[c.userId] || 0) + 1
+    }
+
+    renderUsers(allUsers, convsByUser)
+    renderConvs(allConvs)
+  }
+
+  function renderUsers(users, convsByUser) {
+    document.getElementById('user-count').textContent = users.length
+    const tbody = document.getElementById('users-body')
+    if (!users.length) {
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="6">No users yet.</td></tr>'
+      return
+    }
+    tbody.innerHTML = users.map((u, i) => `
+      <tr>
+        <td class="td-date">${i + 1}</td>
+        <td class="td-name">${esc(u.fullName)}</td>
+        <td class="td-email">${esc(u.email)}</td>
+        <td class="td-id">${esc(u.id)}</td>
+        <td class="td-date">${fmt(u.createdAt)}</td>
+        <td><span class="td-count">${convsByUser[u.id] || 0}</span></td>
+      </tr>
+    `).join('')
+  }
+
+  function renderConvs(convs) {
+    document.getElementById('conv-count').textContent = convs.length
+    const tbody = document.getElementById('convs-body')
+    if (!convs.length) {
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="6">No conversations yet.</td></tr>'
+      return
+    }
+    tbody.innerHTML = convs.map((c, i) => `
+      <tr>
+        <td class="td-date">${i + 1}</td>
+        <td class="td-name">${esc(c.title || 'محادثة جديدة')}</td>
+        <td class="td-email">${esc(c.userName || '—')}</td>
+        <td><span class="td-count">${c.messageCount || 0}</span></td>
+        <td class="td-date">${fmt(c.createdAt)}</td>
+        <td class="td-date">${fmt(c.updatedAt)}</td>
+      </tr>
+    `).join('')
+  }
+
+  function filterUsers() {
+    const q = document.getElementById('user-search').value.toLowerCase()
+    const filtered = allUsers.filter(u =>
+      u.fullName.toLowerCase().includes(q) || u.email.toLowerCase().includes(q)
+    )
+    const convsByUser = {}
+    for (const c of allConvs) convsByUser[c.userId] = (convsByUser[c.userId] || 0) + 1
+    renderUsers(filtered, convsByUser)
+  }
+
+  function filterConvs() {
+    const q = document.getElementById('conv-search').value.toLowerCase()
+    const filtered = allConvs.filter(c =>
+      (c.title || '').toLowerCase().includes(q) || (c.userName || '').toLowerCase().includes(q)
+    )
+    renderConvs(filtered)
+  }
+
+  async function logout() {
+    await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' })
+    window.location.href = '/'
+  }
+
+  function showError(msg) {
+    const el = document.getElementById('error-msg')
+    el.textContent = msg
+    el.style.display = 'block'
+  }
+
+  function esc(str) {
+    return String(str)
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;').replace(/'/g,'&#39;')
+  }
+
+  // Auto-check on load
+  window.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('loading-overlay').style.display = 'none'
+    checkAccess()
+  })
+</script>
+</body>
+</html>

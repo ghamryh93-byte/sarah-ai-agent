@@ -9,6 +9,9 @@ const CONVERSATIONS_DIR = path.join(DATA_DIR, "conversations")
 const USERS_FILE = path.join(DATA_DIR, "users.json")
 const SESSIONS_FILE = path.join(DATA_DIR, "sessions.json")
 
+// Admins list is always read from the repo's /data folder, not /tmp
+const ADMINS_FILE = path.join(__dirname, "..", "data", "admins.json")
+
 export type UserRecord = {
   id: string
   fullName: string
@@ -200,6 +203,45 @@ export function deleteConversation(id: string): boolean {
   if (!fs.existsSync(file)) return false
   fs.unlinkSync(file)
   return true
+}
+
+export function getAllUsers(): Omit<UserRecord, "passwordHash" | "resetCodeHash" | "resetCodeExpiresAt" | "resetCodeAttempts">[] {
+  return users.map(({ id, fullName, email, createdAt }) => ({ id, fullName, email, createdAt }))
+}
+
+export function listAllConversations(): ConversationRecord[] {
+  const result: ConversationRecord[] = []
+  for (const id of listConversationIds()) {
+    const conv = readConversation(id)
+    if (conv) result.push(conv)
+  }
+  return result.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
+}
+
+export function isAdminEmail(email: string): boolean {
+  if (!email) return false
+  const normalized = email.trim().toLowerCase()
+
+  // 1. Check environment variable ADMIN_EMAILS (e.g. from Vercel: "email1,email2")
+  if (process.env.ADMIN_EMAILS) {
+    const envAdmins = process.env.ADMIN_EMAILS.split(",").map(e => e.trim().toLowerCase()).filter(Boolean)
+    if (envAdmins.includes(normalized)) return true
+  }
+
+  // 2. Check data/admins.json file
+  try {
+    if (fs.existsSync(ADMINS_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(ADMINS_FILE, "utf8")) as { admins?: string[] }
+      const fileAdmins = Array.isArray(parsed.admins) ? parsed.admins.map((e: string) => e.trim().toLowerCase()) : []
+      if (fileAdmins.includes(normalized)) return true
+    }
+  } catch {
+    // continue to fallback
+  }
+
+  // 3. Built-in default admins fallback
+  const defaultAdmins = ["ghmaryh93@gmail.com", "gumballsir3@gmail.com"]
+  return defaultAdmins.includes(normalized)
 }
 
 initStorage()
