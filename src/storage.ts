@@ -67,20 +67,44 @@ function atomicWriteFile(file: string, content: string): void {
   fs.renameSync(tmpFile, file)
 }
 
-const KV_URL = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL
-const KV_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN
-const HAS_BLOB = Boolean(process.env.BLOB_READ_WRITE_TOKEN)
+function getBlobToken(): string | undefined {
+  return process.env.BLOB_READ_WRITE_TOKEN
+}
+
+function getKvUrl(): string | undefined {
+  return process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL
+}
+
+function getKvToken(): string | undefined {
+  return process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN
+}
+
+function hasCloudConfigured(): boolean {
+  return Boolean(getBlobToken() || (getKvUrl() && getKvToken()))
+}
 
 async function blobGet<T>(pathname: string): Promise<T | null> {
-  const token = process.env.BLOB_READ_WRITE_TOKEN
+  const token = getBlobToken()
   if (!token) return null
   try {
     const { blobs } = await list({ prefix: pathname, token })
     if (!blobs || blobs.length === 0) return null
-    const exact = blobs.find((b: any) => b.pathname === pathname) || blobs[0]
+    const matching = blobs.filter((b: any) => b.pathname === pathname)
+    const exact = matching.length > 0
+      ? matching.sort((a: any, b: any) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime())[0]
+      : blobs[0]
+    const targetUrl = exact.downloadUrl || exact.url
     const fetchFn = typeof fetch !== "undefined" ? fetch : require("node-fetch")
-    const res = await fetchFn(`${exact.url}?t=${Date.now()}`)
-    if (!res.ok) return null
+    const res = await fetchFn(`${targetUrl}?t=${Date.now()}`, {
+      headers: {
+        "Cache-Control": "no-cache",
+        Pragma: "no-cache"
+      }
+    })
+    if (!res.ok) {
+      console.warn(`Blob fetch returned HTTP ${res.status} for ${pathname}`)
+      return null
+    }
     return (await res.json()) as T
   } catch (err) {
     console.error(`Blob read error for ${pathname}:`, (err as Error).message)
@@ -89,37 +113,46 @@ async function blobGet<T>(pathname: string): Promise<T | null> {
 }
 
 async function blobSet(pathname: string, data: any): Promise<void> {
-  const token = process.env.BLOB_READ_WRITE_TOKEN
-  if (!token) return
+  const token = getBlobToken()
+  if (!token) {
+    console.warn(`blobSet skipped: BLOB_READ_WRITE_TOKEN not provided`)
+    return
+  }
   try {
-    await put(pathname, JSON.stringify(data), {
+    const result = await put(pathname, JSON.stringify(data), {
       access: "public",
       addRandomSuffix: false,
       allowOverwrite: true,
       contentType: "application/json",
       token
     })
+    console.log(`Blob successfully saved for ${pathname}: ${result.url}`)
   } catch (err) {
     console.error(`Blob write error for ${pathname}:`, (err as Error).message)
   }
 }
 
-export function getStorageEngineInfo(): { engine: string; connected: boolean } {
-  if (process.env.BLOB_READ_WRITE_TOKEN) {
-    return { engine: "Vercel Blob", connected: true }
+export function getStorageEngineInfo(): { engine: string; connected: boolean; persistent: boolean } {
+  if (getBlobToken()) {
+    return { engine: "Vercel Blob", connected: true, persistent: true }
   }
-  if (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL) {
-    return { engine: "Vercel KV / Upstash Redis", connected: true }
+  if (getKvUrl() && getKvToken()) {
+    return { engine: "Vercel KV / Upstash Redis", connected: true, persistent: true }
   }
-  return { engine: "Local Ephemeral (No Persistent Database Connected)", connected: false }
+  if (!process.env.VERCEL) {
+    return { engine: "Local Filesystem (/data)", connected: true, persistent: true }
+  }
+  return { engine: "Local Ephemeral (/tmp, No Persistent Database Connected)", connected: false, persistent: false }
 }
 
 async function kvGet<T>(key: string): Promise<T | null> {
-  if (!KV_URL || !KV_TOKEN) return null
+  const kvUrl = getKvUrl()
+  const kvToken = getKvToken()
+  if (!kvUrl || !kvToken) return null
   try {
     const fetchFn = typeof fetch !== "undefined" ? fetch : require("node-fetch")
-    const res = await fetchFn(`${KV_URL}/get/${encodeURIComponent(key)}`, {
-      headers: { Authorization: `Bearer ${KV_TOKEN}` }
+    const res = await fetchFn(`${kvUrl}/get/${encodeURIComponent(key)}`, {
+      headers: { Authorization: `Bearer ${kvToken}` }
     })
     if (!res.ok) return null
     const json = (await res.json()) as { result?: any }
@@ -132,13 +165,15 @@ async function kvGet<T>(key: string): Promise<T | null> {
 }
 
 async function kvSet(key: string, value: any): Promise<void> {
-  if (!KV_URL || !KV_TOKEN) return
+  const kvUrl = getKvUrl()
+  const kvToken = getKvToken()
+  if (!kvUrl || !kvToken) return
   try {
     const fetchFn = typeof fetch !== "undefined" ? fetch : require("node-fetch")
-    await fetchFn(`${KV_URL}/set/${encodeURIComponent(key)}`, {
+    await fetchFn(`${kvUrl}/set/${encodeURIComponent(key)}`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${KV_TOKEN}`,
+        Authorization: `Bearer ${kvToken}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify(typeof value === "string" ? value : JSON.stringify(value))
@@ -150,10 +185,12 @@ async function kvSet(key: string, value: any): Promise<void> {
 
 export async function persistUsersAsync(): Promise<void> {
   atomicWriteFile(USERS_FILE, JSON.stringify({ users }, null, 2))
-  if (KV_URL && KV_TOKEN) {
+  const kvUrl = getKvUrl()
+  const kvToken = getKvToken()
+  if (kvUrl && kvToken) {
     await kvSet("sarah:users", users).catch(() => {})
   }
-  if (process.env.BLOB_READ_WRITE_TOKEN) {
+  if (getBlobToken()) {
     await blobSet("data/users.json", users).catch(() => {})
   }
 }
@@ -171,10 +208,12 @@ function purgeSessions(): void {
 export async function persistSessionsAsync(): Promise<void> {
   purgeSessions()
   atomicWriteFile(SESSIONS_FILE, JSON.stringify({ sessions }, null, 2))
-  if (KV_URL && KV_TOKEN) {
+  const kvUrl = getKvUrl()
+  const kvToken = getKvToken()
+  if (kvUrl && kvToken) {
     await kvSet("sarah:sessions", sessions).catch(() => {})
   }
-  if (process.env.BLOB_READ_WRITE_TOKEN) {
+  if (getBlobToken()) {
     await blobSet("data/sessions.json", sessions).catch(() => {})
   }
 }
@@ -188,43 +227,50 @@ export function persistSessions(): void {
 let lastSyncTime = 0
 const SYNC_INTERVAL_MS = 2000
 
-export async function syncStorageWithCloud(): Promise<void> {
-  const hasCloud = Boolean((KV_URL && KV_TOKEN) || HAS_BLOB)
-  if (!hasCloud) return
+export async function syncStorageWithCloud(force = false): Promise<void> {
+  if (!hasCloudConfigured()) return
   const now = Date.now()
-  if (now - lastSyncTime < SYNC_INTERVAL_MS) return
+  if (!force && now - lastSyncTime < SYNC_INTERVAL_MS) return
   lastSyncTime = now
 
   try {
     let cloudUsers: UserRecord[] | null = null
-    if (HAS_BLOB) {
+    if (getBlobToken()) {
       cloudUsers = await blobGet<UserRecord[]>("data/users.json")
-    } else if (KV_URL && KV_TOKEN) {
+    } else if (getKvUrl() && getKvToken()) {
       cloudUsers = await kvGet<UserRecord[]>("sarah:users")
     }
 
     if (cloudUsers && Array.isArray(cloudUsers)) {
-      const emailMap = new Map<string, UserRecord>()
-      for (const u of cloudUsers) emailMap.set(u.email, u)
-      for (const u of users) {
-        if (!emailMap.has(u.email)) emailMap.set(u.email, u)
+      const userMap = new Map<string, UserRecord>()
+      for (const u of cloudUsers) {
+        if (u && u.id && u.email) userMap.set(u.id, u)
       }
-      users = Array.from(emailMap.values())
+      for (const u of users) {
+        if (u && u.id && u.email && !userMap.has(u.id)) {
+          userMap.set(u.id, u)
+        }
+      }
+      users = Array.from(userMap.values())
       atomicWriteFile(USERS_FILE, JSON.stringify({ users }, null, 2))
     }
 
     let cloudSessions: SessionRecord[] | null = null
-    if (HAS_BLOB) {
+    if (getBlobToken()) {
       cloudSessions = await blobGet<SessionRecord[]>("data/sessions.json")
-    } else if (KV_URL && KV_TOKEN) {
+    } else if (getKvUrl() && getKvToken()) {
       cloudSessions = await kvGet<SessionRecord[]>("sarah:sessions")
     }
 
     if (cloudSessions && Array.isArray(cloudSessions)) {
       const idMap = new Map<string, SessionRecord>()
-      for (const s of cloudSessions) idMap.set(s.id, s)
+      for (const s of cloudSessions) {
+        if (s && s.id) idMap.set(s.id, s)
+      }
       for (const s of sessions) {
-        if (!idMap.has(s.id)) idMap.set(s.id, s)
+        if (s && s.id && !idMap.has(s.id)) {
+          idMap.set(s.id, s)
+        }
       }
       sessions = Array.from(idMap.values())
       purgeSessions()
@@ -250,7 +296,8 @@ export function initStorage(): void {
       users = []
     }
   } else {
-    persistUsers()
+    // Write empty local file only; DO NOT call persistUsers() which would overwrite cloud DB with empty array
+    atomicWriteFile(USERS_FILE, JSON.stringify({ users: [] }, null, 2))
   }
 
   if (fs.existsSync(SESSIONS_FILE)) {
@@ -260,9 +307,10 @@ export function initStorage(): void {
     } catch {
       sessions = []
     }
+  } else {
+    // Write empty local file only; DO NOT call persistSessions() which would overwrite cloud DB with empty array
+    atomicWriteFile(SESSIONS_FILE, JSON.stringify({ sessions: [] }, null, 2))
   }
-
-  persistSessions()
 }
 
 export function generateId(prefix: string): string {
