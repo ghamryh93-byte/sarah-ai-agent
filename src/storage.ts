@@ -85,6 +85,14 @@ function getBlobToken(): string | undefined {
   return undefined
 }
 
+function getBlobStoreId(): string | undefined {
+  return process.env.BLOB_STORE_ID?.trim() || undefined
+}
+
+function hasBlobConfigured(): boolean {
+  return Boolean(getBlobToken() || getBlobStoreId())
+}
+
 function getKvUrl(): string | undefined {
   return process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL
 }
@@ -94,14 +102,22 @@ function getKvToken(): string | undefined {
 }
 
 function hasCloudConfigured(): boolean {
-  return Boolean(getBlobToken() || (getKvUrl() && getKvToken()))
+  return Boolean(hasBlobConfigured() || (getKvUrl() && getKvToken()))
+}
+
+function blobOptions(): Record<string, any> {
+  const token = getBlobToken()
+  const storeId = getBlobStoreId()
+  if (token) return { token }
+  if (storeId) return { storeId }
+  return {}
 }
 
 async function blobGet<T>(pathname: string): Promise<T | null> {
-  const token = getBlobToken()
-  if (!token) return null
+  if (!hasBlobConfigured()) return null
   try {
-    const { blobs } = await list({ prefix: pathname, token })
+    const opts = blobOptions()
+    const { blobs } = await list({ prefix: pathname, ...opts })
     if (!blobs || blobs.length === 0) return null
     const matching = blobs.filter((b: any) => b.pathname === pathname)
     const exact = matching.length > 0
@@ -127,18 +143,18 @@ async function blobGet<T>(pathname: string): Promise<T | null> {
 }
 
 async function blobSet(pathname: string, data: any): Promise<void> {
-  const token = getBlobToken()
-  if (!token) {
-    console.warn(`blobSet skipped: BLOB_READ_WRITE_TOKEN not provided`)
+  if (!hasBlobConfigured()) {
+    console.warn(`blobSet skipped: no Blob credentials (BLOB_READ_WRITE_TOKEN or BLOB_STORE_ID) found`)
     return
   }
   try {
+    const opts = blobOptions()
     const result = await put(pathname, JSON.stringify(data), {
       access: "public",
       addRandomSuffix: false,
       allowOverwrite: true,
       contentType: "application/json",
-      token
+      ...opts
     })
     console.log(`Blob successfully saved for ${pathname}: ${result.url}`)
   } catch (err) {
@@ -148,7 +164,10 @@ async function blobSet(pathname: string, data: any): Promise<void> {
 
 export function getStorageEngineInfo(): { engine: string; connected: boolean; persistent: boolean } {
   if (getBlobToken()) {
-    return { engine: "Vercel Blob", connected: true, persistent: true }
+    return { engine: "Vercel Blob (token auth)", connected: true, persistent: true }
+  }
+  if (getBlobStoreId()) {
+    return { engine: "Vercel Blob (store ID / OIDC)", connected: true, persistent: true }
   }
   if (getKvUrl() && getKvToken()) {
     return { engine: "Vercel KV / Upstash Redis", connected: true, persistent: true }
