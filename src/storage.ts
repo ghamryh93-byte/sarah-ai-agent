@@ -68,7 +68,21 @@ function atomicWriteFile(file: string, content: string): void {
 }
 
 function getBlobToken(): string | undefined {
-  return process.env.BLOB_READ_WRITE_TOKEN
+  if (process.env.BLOB_READ_WRITE_TOKEN) {
+    return process.env.BLOB_READ_WRITE_TOKEN.trim()
+  }
+  // Detect any token with custom prefix or standard Vercel format
+  for (const [key, val] of Object.entries(process.env)) {
+    if (typeof val === "string" && val.trim().startsWith("vercel_blob_rw_")) {
+      return val.trim()
+    }
+    if (key.includes("BLOB") && (key.includes("TOKEN") || key.endsWith("_READ_WRITE_TOKEN"))) {
+      if (typeof val === "string" && val.trim().length > 10) {
+        return val.trim()
+      }
+    }
+  }
+  return undefined
 }
 
 function getKvUrl(): string | undefined {
