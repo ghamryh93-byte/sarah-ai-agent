@@ -324,6 +324,7 @@
     app.state.currentTitle = ""
     messagesEl.innerHTML = ""
     hideError()
+    if (listening) stopDictation()
     pendingAttachments = []
     renderAttachmentPreview()
     app.show(welcomeEl)
@@ -360,6 +361,7 @@
 
   function doSend(text, isRetry, retryAttachments) {
     text = (text || "").trim()
+    if (listening) stopDictation()
 
     var attachments = isRetry ? (retryAttachments || []) : pendingAttachments.slice()
     if ((!text && !attachments.length) || app.state.sending) return
@@ -619,6 +621,88 @@
       uploadNext(Array.prototype.slice.call(items), 0, renderAttachmentPreview)
     }
   })
+
+  // ---------------------------------------------------------------------------
+  // Voice input (Web Speech API — dictation into the composer)
+  // ---------------------------------------------------------------------------
+  var micBtn = app.$("micBtn")
+  var recognition = null
+  var listening = false
+  var dictationBase = ""
+  var dictationFinal = ""
+
+  function stopDictation() {
+    listening = false
+    if (recognition) {
+      try {
+        recognition.abort()
+      } catch (e) {}
+    }
+    if (micBtn) {
+      micBtn.classList.remove("is-listening")
+      micBtn.setAttribute("aria-pressed", "false")
+    }
+  }
+
+  if (micBtn) {
+    var SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (!SpeechRecognitionCtor) {
+      micBtn.hidden = true
+    } else {
+      recognition = new SpeechRecognitionCtor()
+      recognition.lang = "ar-EG"
+      recognition.continuous = true
+      recognition.interimResults = true
+      recognition.maxAlternatives = 1
+
+      recognition.onresult = function (event) {
+        var interim = ""
+        for (var i = event.resultIndex; i < event.results.length; i++) {
+          var phrase = event.results[i][0].transcript
+          if (event.results[i].isFinal) {
+            dictationFinal += phrase.trim() + " "
+          } else {
+            interim += phrase
+          }
+        }
+        inputEl.value = (dictationBase + dictationFinal + interim).replace(/\s+$/, " ")
+        autoGrow()
+      }
+
+      recognition.onerror = function (event) {
+        if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+          showTransientError("صلاحية المايك مش مفعلة. اسمح ليها من المتصفح وجرب تاني.")
+        } else if (event.error === "network") {
+          showTransientError("صوت مش واصل. اتأكد من النت وجرب تاني.")
+        }
+        // "no-speech" and "aborted" are normal — just fall through
+        stopDictation()
+      }
+
+      recognition.onend = function () {
+        // Browsers stop after silence; reflect the real state.
+        if (listening) stopDictation()
+      }
+
+      micBtn.addEventListener("click", function () {
+        if (app.state.sending) return
+        if (listening) {
+          stopDictation()
+          return
+        }
+        dictationBase = inputEl.value ? inputEl.value.replace(/\s*$/, "") + " " : ""
+        dictationFinal = ""
+        listening = true
+        micBtn.classList.add("is-listening")
+        micBtn.setAttribute("aria-pressed", "true")
+        try {
+          recognition.start()
+        } catch (e) {
+          stopDictation()
+        }
+      })
+    }
+  }
 
   var chips = document.querySelectorAll(".chip")
   for (var i = 0; i < chips.length; i++) {

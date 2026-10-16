@@ -1261,6 +1261,54 @@ textarea#messageInput::placeholder {
   transform: scale(0.92);
 }
 
+/* Mic (voice dictation) */
+
+.btn-mic {
+  flex-shrink: 0;
+  width: 42px;
+  height: 42px;
+  border: none;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--c-text-soft);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, transform 0.12s ease;
+}
+
+.btn-mic:hover {
+  background: var(--c-primary-light);
+  color: var(--c-primary);
+}
+
+.btn-mic:active {
+  transform: scale(0.92);
+}
+
+.btn-mic.is-listening {
+  background: var(--c-danger);
+  color: #fff;
+  animation: mic-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes mic-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(217, 44, 44, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(217, 44, 44, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn-mic.is-listening {
+    animation: none;
+  }
+}
+
 .attach-preview {
   display: flex;
   flex-wrap: wrap;
