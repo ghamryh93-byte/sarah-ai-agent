@@ -1303,6 +1303,23 @@ textarea#messageInput::placeholder {
   font-variant-numeric: tabular-nums;
 }
 
+.attach-notes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 820px;
+  margin: 0 auto 8px;
+  padding: 0 2px;
+}
+
+.attach-notes:empty {
+  display: none;
+}
+
+.attach-notes .attach-chip {
+  max-width: 100%;
+}
+
 .attach-chip.is-error {
   border-color: var(--c-danger-border);
   background: var(--c-danger-bg);

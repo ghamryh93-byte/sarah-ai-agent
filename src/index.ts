@@ -876,8 +876,11 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
         respondJson(res, 413, { error: err.message })
         return
       }
+      const detail = ((err as Error).message || "").slice(0, 140)
       console.error("Upload error:", err)
-      respondJson(res, 500, { error: "فشل رفع الملف. حاول تاني." })
+      respondJson(res, 500, {
+        error: "فشل رفع الملف. جرب تاني" + (detail ? ` — سبب محتمل: ${detail}` : "")
+      })
     }
   } else if (req.method === "POST" && pathname === "/api/chat") {
     const user = getSessionUser(req.headers.cookie)

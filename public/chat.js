@@ -15,6 +15,7 @@
   var attachBtn = app.$("attachBtn")
   var fileInput = app.$("fileInput")
   var attachPreviewEl = app.$("attachPreview")
+  var attachNotesEl = app.$("attachNotes")
 
   var typingEl = null
 
@@ -480,18 +481,21 @@
   }
 
   function showTransientError(message) {
+    if (!attachNotesEl) {
+      console.warn("[sarah] attachment error:", message)
+      return
+    }
     var chip = document.createElement("div")
     chip.className = "attach-chip is-error"
     var label = document.createElement("span")
     label.textContent = message
     chip.appendChild(label)
-    attachPreviewEl.appendChild(chip)
-    attachPreviewEl.classList.remove("hidden")
-    attachPreviewEl.removeAttribute("hidden")
+    attachNotesEl.appendChild(chip)
+    attachNotesEl.hidden = false
     setTimeout(function () {
       chip.remove()
-      if (!attachPreviewEl.childElementCount) attachPreviewEl.hidden = true
-    }, 6000)
+      if (!attachNotesEl.childElementCount) attachNotesEl.hidden = true
+    }, 8000)
   }
 
   function renderAttachmentPreview() {
