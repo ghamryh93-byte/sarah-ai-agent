@@ -623,8 +623,9 @@
   })
 
   // ---------------------------------------------------------------------------
-  // Voice input: record your voice → Gemini transcribes it directly.
-  // Strong Egyptian Arabic accuracy (no browser speech engine, no rewrite pass).
+  // Voice input (hybrid):
+  // - while you speak: browser speech engine shows words live (instant preview)
+  // - on stop: the recording goes to Gemini for the accurate final text
   // ---------------------------------------------------------------------------
   var micBtn = app.$("micBtn")
   var recording = false
@@ -632,12 +633,22 @@
   var recorder = null
   var micStream = null
   var recordedChunks = []
+  var recognition = null
+  var voiceBaseText = ""
+  var previewFinal = ""
+  var previewInterim = ""
+  var previewRestartTimer = null
 
   function setMicState(state) {
     if (!micBtn) return
     micBtn.classList.remove("is-listening", "is-processing")
     if (state) micBtn.classList.add(state)
     micBtn.setAttribute("aria-pressed", state === "is-listening" ? "true" : "false")
+  }
+
+  function rebuildVoicePreview() {
+    inputEl.value = (voiceBaseText + previewFinal + previewInterim).replace(/\s+$/, " ")
+    autoGrow()
   }
 
   function releaseMic() {
@@ -648,6 +659,15 @@
     }
     recorder = null
     recordedChunks = []
+    if (recognition) {
+      try {
+        recognition.abort()
+      } catch (e) {}
+    }
+    if (previewRestartTimer) {
+      clearTimeout(previewRestartTimer)
+      previewRestartTimer = null
+    }
   }
 
   function stopRecording() {
@@ -700,11 +720,14 @@
         busyProcessing = false
         setMicState(null)
         var text = data && typeof data.text === "string" ? data.text.trim() : ""
+        previewFinal = ""
+        previewInterim = ""
         if (text) {
-          var existing = inputEl.value.replace(/\s*$/, "")
-          inputEl.value = (existing ? existing + " " : "") + text
+          inputEl.value = (voiceBaseText.replace(/\s*$/, "") + " " + text).replace(/^\s+/, "")
           autoGrow()
+          voiceBaseText = inputEl.value.replace(/\s*$/, "") + " "
         } else {
+          inputEl.value = voiceBaseText
           showTransientError("مسمعتش الكلام كويس. جرب تاني واقرب من المايك.")
         }
       }).catch(function (err) {
@@ -719,6 +742,63 @@
       showTransientError("مقدرتش أقرا التسجيل. جرب تاني.")
     })
     reader.readAsDataURL(blob)
+  }
+
+  // Live preview engine: shows words while you speak (Chrome/Edge/Safari).
+  // Provisional only — the Gemini pass decides the final text.
+  function startVoicePreview() {
+    var SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (!SpeechRecognitionCtor) return // fine: no live preview, final text still comes from Gemini
+
+    var attemptStart = function () {
+      if (!recording) return
+      try {
+        recognition.start()
+      } catch (e) {}
+    }
+
+    recognition = recognition || new SpeechRecognitionCtor()
+    recognition.lang = "ar-EG"
+    recognition.continuous = true
+    recognition.interimResults = true
+    recognition.maxAlternatives = 1
+
+    recognition.onresult = function (event) {
+      if (!recording) return
+      previewInterim = ""
+      for (var i = event.resultIndex; i < event.results.length; i++) {
+        var phrase = event.results[i][0].transcript
+        if (event.results[i].isFinal) {
+          previewFinal += phrase.trim() + " "
+        } else {
+          previewInterim += phrase
+        }
+      }
+      rebuildVoicePreview()
+    }
+
+    // Errors are irrelevant: the preview is cosmetic, the final text comes from
+    // the recording. "no-speech" / "network" etc. just mean pause the preview.
+    recognition.onerror = function () {}
+
+    recognition.onend = function () {
+      if (!recording) return
+      if (previewRestartTimer) clearTimeout(previewRestartTimer)
+      previewRestartTimer = setTimeout(function () {
+        if (!recording) return
+        try {
+          recognition.start()
+        } catch (e) {}
+      }, 300)
+    }
+
+    attemptStart()
+    recognition.onstart = function () {
+      if (previewRestartTimer) {
+        clearTimeout(previewRestartTimer)
+        previewRestartTimer = null
+      }
+    }
   }
 
   if (micBtn) {
@@ -736,12 +816,15 @@
 
         recording = true
         setMicState("is-listening")
+        voiceBaseText = inputEl.value ? inputEl.value.replace(/\s*$/, "") + " " : ""
+        previewFinal = ""
+        previewInterim = ""
+        startVoicePreview()
 
         navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
           if (!recording) {
             // Stopped before permission was granted
-            var tracks = stream.getTracks()
-            for (var i = 0; i < tracks.length; i++) tracks[i].stop()
+            releaseMic()
             setMicState(null)
             return
           }
@@ -776,6 +859,7 @@
           recorder.start(1000)
         }).catch(function (err) {
           recording = false
+          releaseMic()
           setMicState(null)
           if (err && (err.name === "NotAllowedError" || err.name === "SecurityError")) {
             showTransientError("صلاحية المايك مش مفعلة. اسمح ليها من المتصفح وجرب تاني.")
