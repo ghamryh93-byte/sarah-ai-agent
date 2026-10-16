@@ -853,7 +853,9 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       return
     }
 
-    const item = bodyResult.data.file
+    // Accept both flat { name, mime, data } and nested { file: {...} } shapes
+    const raw = bodyResult.data || {}
+    const item: any = raw.file && typeof raw.file === "object" ? raw.file : raw
     if (!item || typeof item.name !== "string" || typeof item.mime !== "string" || typeof item.data !== "string") {
       respondJson(res, 400, { error: "name, mime and data are required." })
       return
