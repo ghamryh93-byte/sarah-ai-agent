@@ -54,6 +54,15 @@ export type ConversationMessage = {
   role: "user" | "assistant"
   content: string
   ts: string
+  attachments?: MessageAttachment[]
+}
+
+export type MessageAttachment = {
+  name: string
+  mime: string
+  url: string
+  size: number
+  type: "image" | "file"
 }
 
 export type ConversationRecord = {
@@ -338,6 +347,78 @@ function conversationToRow(c: ConversationRecord): Record<string, any> {
     created_at: c.createdAt,
     updated_at: c.updatedAt,
     messages: c.messages
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Attachments (Supabase Storage — public bucket, auto-provisioned)
+// ---------------------------------------------------------------------------
+const ATTACHMENT_BUCKET = "sarah-attachments"
+const MAX_ATTACHMENT_BYTES = 3 * 1024 * 1024
+
+let attachmentBucketReady = false
+
+function attachmentType(mime: string): "image" | "file" {
+  return mime.startsWith("image/") ? "image" : "file"
+}
+
+function safeAttachmentName(name: string): string {
+  const trimmed = (name || "file").slice(0, 120)
+  return trimmed.replace(/[\/\\?#%&=:*"'<>|]+/g, "_") || "file"
+}
+
+export class AttachmentValidationError extends Error {}
+
+export async function saveMessageAttachment(
+  conversationId: string,
+  file: { name: string; mime: string; data: string }
+): Promise<MessageAttachment> {
+  if (!attachmentBucketReady) {
+    try {
+      const { data: buckets } = await supabase().storage.listBuckets()
+      if (!buckets || !buckets.find(b => b.name === ATTACHMENT_BUCKET)) {
+        const { error: createErr } = await supabase().storage.createBucket(ATTACHMENT_BUCKET, {
+          public: true,
+          fileSizeLimit: MAX_ATTACHMENT_BYTES
+        })
+        if (createErr && !/exists|duplicate/i.test(createErr.message)) {
+          throw new Error(createErr.message)
+        }
+      }
+      attachmentBucketReady = true
+    } catch (err) {
+      throw new Error(`Attachment storage unavailable: ${(err as Error).message}`)
+    }
+  }
+
+  const buffer = Buffer.from(file.data, "base64")
+  if (buffer.length === 0) {
+    throw new AttachmentValidationError("Attachment file is empty.")
+  }
+  if (buffer.length > MAX_ATTACHMENT_BYTES) {
+    throw new AttachmentValidationError("Attachment file is too large (max 3MB).")
+  }
+
+  const objectPath = `${conversationId}/${Date.now()}-${safeAttachmentName(file.name)}`
+  const { error } = await supabase().storage
+    .from(ATTACHMENT_BUCKET)
+    .upload(objectPath, buffer, {
+      contentType: file.mime,
+      upsert: false
+    })
+  if (error) throw new Error(`Attachment upload failed: ${error.message}`)
+
+  const { data: publicUrl } = supabase().storage.from(ATTACHMENT_BUCKET).getPublicUrl(objectPath)
+  if (!publicUrl || !publicUrl.publicUrl) {
+    throw new Error("Attachment upload failed: could not resolve public URL.")
+  }
+
+  return {
+    name: file.name || "file",
+    mime: file.mime,
+    url: publicUrl.publicUrl,
+    size: buffer.length,
+    type: attachmentType(file.mime)
   }
 }
 

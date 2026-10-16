@@ -18,7 +18,10 @@ import {
   syncStorageWithCloud,
   persistUsersAsync,
   persistSessionsAsync,
-  getStorageEngineInfo
+  getStorageEngineInfo,
+  saveMessageAttachment,
+  AttachmentValidationError,
+  MessageAttachment
 } from "./storage"
 import {
   RegistrationInput,
@@ -38,6 +41,57 @@ import {
 type Message = {
   role: "system" | "user" | "assistant"
   content: string
+  attachments?: MessageAttachment[]
+}
+
+// ---------------------------------------------------------------------------
+// Chat attachments
+// ---------------------------------------------------------------------------
+const ALLOWED_ATTACHMENT_MIMES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+  "application/pdf",
+  "text/plain",
+  "text/markdown"
+])
+const MAX_ATTACHMENTS_PER_MESSAGE = 3
+const UPLOAD_BODY_MAX_BYTES = 4.4 * 1024 * 1024
+
+function parseIncomingAttachments(raw: unknown): { ok: MessageAttachment[] } | { error: string } {
+  if (raw === undefined || raw === null) return { ok: [] }
+  if (!Array.isArray(raw)) return { error: "Attachments must be an array." }
+  if (raw.length > MAX_ATTACHMENTS_PER_MESSAGE) {
+    return { error: `يمكن إرسال ${MAX_ATTACHMENTS_PER_MESSAGE} ملفات كحد أقصى في الرسالة الواحدة.` }
+  }
+  const ok: MessageAttachment[] = []
+  for (const item of raw) {
+    const a = item as MessageAttachment
+    if (!a || typeof a.name !== "string" || typeof a.mime !== "string" || typeof a.url !== "string") {
+      return { error: "بيانات المرفق غير مكتملة." }
+    }
+    if (!ALLOWED_ATTACHMENT_MIMES.has(a.mime.toLowerCase())) {
+      return { error: `نوع الملف غير مدعوم: ${a.name}` }
+    }
+    // SSRF guard: only accept URLs we issued from our own Supabase storage host
+    try {
+      const storageHost = process.env.SUPABASE_URL ? new URL(process.env.SUPABASE_URL).host : ""
+      if (!storageHost || new URL(a.url).host !== storageHost) {
+        return { error: "مصدر المرفق غير موثوق." }
+      }
+    } catch {
+      return { error: "رابط المرفق غير صالح." }
+    }
+    ok.push({
+      name: a.name.slice(0, 120),
+      mime: a.mime.toLowerCase(),
+      url: a.url,
+      size: typeof a.size === "number" ? a.size : 0,
+      type: a.mime.toLowerCase().startsWith("image/") ? "image" : "file"
+    })
+  }
+  return { ok }
 }
 
 const memory: Map<string, Message[]> = new Map()
@@ -435,7 +489,7 @@ type JsonBodyResult =
   | { ok: true; data: any }
   | { ok: false; status: number; error: string }
 
-function readJsonBody(req: http.IncomingMessage): Promise<JsonBodyResult> {
+function readJsonBody(req: http.IncomingMessage, maxBytes: number = MAX_BODY_BYTES): Promise<JsonBodyResult> {
   return new Promise(resolve => {
     const contentType = String(req.headers["content-type"] || "").toLowerCase()
     if (!contentType.includes("application/json")) {
@@ -447,7 +501,7 @@ function readJsonBody(req: http.IncomingMessage): Promise<JsonBodyResult> {
 
     req.on("data", (chunk: string) => {
       body += chunk
-      if (Buffer.byteLength(body, "utf8") > MAX_BODY_BYTES) {
+      if (Buffer.byteLength(body, "utf8") > maxBytes) {
         req.removeAllListeners("data")
         req.removeAllListeners("end")
         req.resume()
@@ -786,6 +840,45 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
     }
     await writeConversation(conversation)
     respondJson(res, 201, { conversation })
+  } else if (req.method === "POST" && pathname === "/api/upload") {
+    const user = getSessionUser(req.headers.cookie)
+    if (!user) {
+      respondJson(res, 401, { error: "Not authenticated" })
+      return
+    }
+
+    const bodyResult = await readJsonBody(req, UPLOAD_BODY_MAX_BYTES)
+    if (!bodyResult.ok) {
+      respondJson(res, bodyResult.status, { error: bodyResult.error })
+      return
+    }
+
+    const item = bodyResult.data.file
+    if (!item || typeof item.name !== "string" || typeof item.mime !== "string" || typeof item.data !== "string") {
+      respondJson(res, 400, { error: "name, mime and data are required." })
+      return
+    }
+
+    if (!ALLOWED_ATTACHMENT_MIMES.has(item.mime.toLowerCase())) {
+      respondJson(res, 415, { error: "نوع الملف غير مدعوم. الصور (PNG/JPG/WEBP/GIF) وPDF وTXT مدعومة فقط." })
+      return
+    }
+
+    try {
+      const saved = await saveMessageAttachment(user.id, {
+        name: item.name,
+        mime: item.mime.toLowerCase(),
+        data: item.data
+      })
+      respondJson(res, 200, { attachment: saved })
+    } catch (err) {
+      if (err instanceof AttachmentValidationError) {
+        respondJson(res, 413, { error: err.message })
+        return
+      }
+      console.error("Upload error:", err)
+      respondJson(res, 500, { error: "فشل رفع الملف. حاول تاني." })
+    }
   } else if (req.method === "POST" && pathname === "/api/chat") {
     const user = getSessionUser(req.headers.cookie)
     if (!user) {
@@ -800,36 +893,64 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
     }
 
     const data = bodyResult.data
-    if (typeof data.conversationId !== "string" || typeof data.message !== "string" || !data.message.trim()) {
-      respondJson(res, 400, { error: "conversationId and message are required." })
+
+    const attachmentCheck = parseIncomingAttachments(data.attachments)
+    if ("error" in attachmentCheck) {
+      respondJson(res, 400, { error: attachmentCheck.error })
+      return
+    }
+    const attachments = attachmentCheck.ok
+
+    if ((typeof data.message !== "string" || !data.message.trim()) && attachments.length === 0) {
+      respondJson(res, 400, { error: "conversationId و message مطلوبين." })
       return
     }
 
     if (data.message.length > MAX_MESSAGE_LENGTH) {
-      respondJson(res, 400, { error: "Message is too long." })
+      respondJson(res, 400, { error: "الرسالة أطول من اللازم." })
       return
     }
 
     const conversation = await readConversation(data.conversationId)
     if (!conversation || conversation.userId !== user.id) {
-      respondJson(res, 404, { error: "Conversation not found." })
+      respondJson(res, 404, { error: "المحادثة مش موجودة." })
       return
     }
 
     try {
       const now = new Date().toISOString()
-      conversation.messages.push({ role: "user", content: data.message, ts: now })
+      conversation.messages.push({
+        role: "user",
+        content: data.message || "",
+        ts: now,
+        ...(attachments.length ? { attachments } : {})
+      })
 
       if (!conversation.title || conversation.title === DEFAULT_CONVERSATION_TITLE) {
-        conversation.title = data.message.trim().replace(/\s+/g, " ").slice(0, 60)
+        if (data.message.trim()) {
+          conversation.title = data.message.trim().replace(/\s+/g, " ").slice(0, 60)
+        } else if (attachments.length) {
+          conversation.title = attachments[0].name.slice(0, 60)
+        }
       }
       conversation.updatedAt = now
 
+      const history = conversation.messages.slice(-CHAT_HISTORY_LIMIT)
+      const lastUserIndex = (() => {
+        for (let i = history.length - 1; i >= 0; i--) {
+          if (history[i].role === "user") return i
+        }
+        return -1
+      })()
+
       const chatMessages: Message[] = [
         { role: "system", content: SARAH_CONTEXT },
-        ...conversation.messages.slice(-CHAT_HISTORY_LIMIT).map(m => ({
+        ...history.map((m, i) => ({
           role: m.role,
-          content: m.content
+          content: m.content,
+          // Only the current user message carries attachments for the model;
+          // older turns stay text-only to keep requests small.
+          ...(i === lastUserIndex && m.role === "user" && m.attachments ? { attachments: m.attachments } : {})
         }))
       ]
 

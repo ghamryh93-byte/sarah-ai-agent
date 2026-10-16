@@ -12,6 +12,9 @@
   var listEl = app.$("conversationList")
   var sidebarEl = app.$("sidebar")
   var overlayEl = app.$("sidebarOverlay")
+  var attachBtn = app.$("attachBtn")
+  var fileInput = app.$("fileInput")
+  var attachPreviewEl = app.$("attachPreview")
 
   var typingEl = null
 
@@ -33,7 +36,111 @@
     app.hide(overlayEl)
   }
 
-  function addMessage(role, text, isHistory) {
+  function makeSvgIcon(path) {
+    var span = document.createElement("span")
+    span.setAttribute("aria-hidden", "true")
+    span.innerHTML =
+      '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+      path + "</svg>"
+    return span.firstChild
+  }
+
+  var IMG_ICON = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.09-3.09a2 2 0 0 0-2.82 0L6 21"/></svg>'
+  var DOC_ICON = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></svg>'
+  var CLOSE_ICON = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>'
+
+  function formatBytes(bytes) {
+    if (!bytes) return ""
+    if (bytes < 1024) return bytes + " B"
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + " KB"
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB"
+  }
+
+  function openLightbox(src, alt) {
+    var lb = document.createElement("div")
+    lb.className = "lightbox"
+    lb.setAttribute("role", "dialog")
+    lb.setAttribute("aria-modal", "true")
+    lb.setAttribute("aria-label", alt || "صورة مرفقة")
+
+    var img = document.createElement("img")
+    img.src = src
+    img.alt = alt || ""
+
+    var close = document.createElement("button")
+    close.type = "button"
+    close.className = "lightbox-close"
+    close.setAttribute("aria-label", "إغلاق الصورة")
+    close.appendChild(makeSvgIcon(CLOSE_ICON))
+
+    function closeLb() {
+      lb.remove()
+      document.removeEventListener("keydown", onKey)
+    }
+    function onKey(e) {
+      if (e.key === "Escape") closeLb()
+    }
+
+    lb.appendChild(img)
+    lb.appendChild(close)
+    lb.addEventListener("click", function (e) {
+      if (e.target === lb || e.target === img) closeLb()
+    })
+    close.addEventListener("click", closeLb)
+    document.addEventListener("keydown", onKey)
+    document.body.appendChild(lb)
+    close.focus()
+  }
+
+  function buildAttachmentMedia(attachments) {
+    var media = document.createElement("div")
+    media.className = "attach-media"
+
+    for (var i = 0; i < attachments.length; i++) {
+      var a = attachments[i]
+      var holder = document.createElement("div")
+      holder.className = "msg-attachment"
+
+      if (a.type === "image" && a.url) {
+        var img = document.createElement("img")
+        img.src = a.url
+        img.alt = a.name
+        img.loading = "lazy"
+        img.decoding = "async"
+        img.className = "zoomable"
+        var target = a.name
+        img.addEventListener("click", function () {
+          openLightbox(this.src, this.alt || target)
+        })
+        holder.appendChild(img)
+      } else if (a.url) {
+        var chip = document.createElement("a")
+        chip.className = "file-chip"
+        chip.href = a.url
+        chip.target = "_blank"
+        chip.rel = "noopener"
+        if (a.name) chip.download = a.name
+        chip.appendChild(makeSvgIcon(a.type === "image" ? IMG_ICON : DOC_ICON))
+        var label = document.createElement("span")
+        label.className = "attach-name"
+        label.textContent = a.name
+        chip.appendChild(label)
+        if (a.size) {
+          var size = document.createElement("span")
+          size.className = "attach-size"
+          size.textContent = formatBytes(a.size)
+          chip.appendChild(size)
+        }
+        holder.appendChild(chip)
+      }
+
+      if (holder.firstChild) media.appendChild(holder)
+    }
+
+    return media
+  }
+
+  function addMessage(role, text, isHistory, attachments) {
     var wrap = document.createElement("div")
     wrap.className = "msg " + (role === "user" ? "msg-user" : "msg-sarah")
 
@@ -47,7 +154,16 @@
     var bubble = document.createElement("div")
     bubble.className = "bubble"
     bubble.dir = "auto"
-    bubble.textContent = text
+
+    if (attachments && attachments.length) {
+      bubble.appendChild(buildAttachmentMedia(attachments))
+    }
+
+    if (text) {
+      bubble.appendChild(document.createTextNode(text))
+    } else if (!attachments || !attachments.length) {
+      bubble.textContent = ""
+    }
 
     wrap.appendChild(bubble)
     messagesEl.appendChild(wrap)
@@ -87,7 +203,7 @@
     if (el) el.remove()
   }
 
-  function showError(message, failedText) {
+  function showError(message, failedText, failedAttachments) {
     hideError()
 
     var wrap = document.createElement("div")
@@ -107,7 +223,7 @@
     retry.textContent = "حاول تاني"
     retry.addEventListener("click", function () {
       hideError()
-      doSend(failedText, true)
+      doSend(failedText, true, failedAttachments)
     })
 
     bubble.appendChild(msg)
@@ -207,6 +323,8 @@
     app.state.currentTitle = ""
     messagesEl.innerHTML = ""
     hideError()
+    pendingAttachments = []
+    renderAttachmentPreview()
     app.show(welcomeEl)
     setHeaderTitle("سارة")
     renderList()
@@ -225,7 +343,8 @@
       app.hide(welcomeEl)
 
       for (var i = 0; i < conv.messages.length; i++) {
-        addMessage(conv.messages[i].role, conv.messages[i].content, true)
+        var m = conv.messages[i]
+        addMessage(m.role, m.content, true, m.attachments)
       }
 
       setHeaderTitle(conv.title)
@@ -238,13 +357,18 @@
     })
   }
 
-  function doSend(text, isRetry) {
+  function doSend(text, isRetry, retryAttachments) {
     text = (text || "").trim()
-    if (!text || app.state.sending) return
+
+    var attachments = isRetry ? (retryAttachments || []) : pendingAttachments.slice()
+    if ((!text && !attachments.length) || app.state.sending) return
 
     if (!isRetry) {
-      addMessage("user", text)
+      addMessage("user", text, false, attachments)
       app.hide(welcomeEl)
+      // Queue cleared: optimistic. On failure they are handed back to retry.
+      pendingAttachments = []
+      renderAttachmentPreview()
     }
 
     app.state.sending = true
@@ -265,7 +389,11 @@
     prepare.then(function (conversationId) {
       return app.api("/api/chat", {
         method: "POST",
-        body: { conversationId: conversationId, message: text }
+        body: {
+          conversationId: conversationId,
+          message: text,
+          attachments: attachments
+        }
       })
     }).then(function (data) {
       hideTyping()
@@ -279,7 +407,15 @@
       hideTyping()
       app.state.sending = false
       sendBtn.disabled = false
-      showError((err && err.error) || "مش قادرة أوصل بالسيرفر دلوقتي. حاول تاني.", text)
+      if (!isRetry && attachments.length) {
+        pendingAttachments = attachments
+        renderAttachmentPreview()
+      }
+      showError(
+        (err && err.error) || "مش قادرة أوصل بالسيرفر دلوقتي. حاول تاني.",
+        text,
+        attachments
+      )
     })
 
     if (!isRetry) {
@@ -304,6 +440,180 @@
 
   sendBtn.addEventListener("click", function () {
     doSend(inputEl.value, false)
+  })
+
+  // ---------------------------------------------------------------------------
+  // Attachments: select → validate → upload one-by-one → preview → send
+  // ---------------------------------------------------------------------------
+  var MAX_FILE_BYTES = 3 * 1024 * 1024
+  var MAX_FILES_PER_MESSAGE = 3
+  var ALLOWED_MIMES = ["image/png", "image/jpeg", "image/webp", "image/gif", "application/pdf", "text/plain", "text/markdown"]
+  var pendingAttachments = []
+
+  function mimeOf(file) {
+    var t = (file.type || "").toLowerCase()
+    if (ALLOWED_MIMES.indexOf(t) !== -1) return t
+    var name = file.name || ""
+    if (/\.txt$/i.test(name)) return "text/plain"
+    if (/\.md$/i.test(name)) return "text/markdown"
+    if (/\.pdf$/i.test(name)) return "application/pdf"
+    if (/\.png$/i.test(name)) return "image/png"
+    if (/\.jpe?g$/i.test(name)) return "image/jpeg"
+    if (/\.webp$/i.test(name)) return "image/webp"
+    if (/\.gif$/i.test(name)) return "image/gif"
+    return ""
+  }
+
+  function readFileAsBase64(file) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader()
+      reader.addEventListener("load", function () {
+        var result = String(reader.result || "")
+        var comma = result.indexOf(",")
+        resolve(comma === -1 ? result : result.slice(comma + 1))
+      })
+      reader.addEventListener("error", function () {
+        reject(new Error("read failed"))
+      })
+      reader.readAsDataURL(file)
+    })
+  }
+
+  function showTransientError(message) {
+    var chip = document.createElement("div")
+    chip.className = "attach-chip is-error"
+    var label = document.createElement("span")
+    label.textContent = message
+    chip.appendChild(label)
+    attachPreviewEl.appendChild(chip)
+    attachPreviewEl.classList.remove("hidden")
+    attachPreviewEl.removeAttribute("hidden")
+    setTimeout(function () {
+      chip.remove()
+      if (!attachPreviewEl.childElementCount) attachPreviewEl.hidden = true
+    }, 6000)
+  }
+
+  function renderAttachmentPreview() {
+    attachPreviewEl.innerHTML = ""
+
+    for (var i = 0; i < pendingAttachments.length; i++) {
+      var a = pendingAttachments[i]
+
+      var chip = document.createElement("div")
+      chip.className = "attach-chip"
+
+      var label = document.createElement("span")
+      label.className = "attach-name"
+      label.textContent = a.name
+      chip.appendChild(label)
+
+      if (a.size) {
+        var size = document.createElement("span")
+        size.className = "attach-size"
+        size.textContent = formatBytes(a.size)
+        chip.appendChild(size)
+      }
+
+      var rm = document.createElement("button")
+      rm.type = "button"
+      rm.className = "rm"
+      rm.setAttribute("aria-label", "إزالة المرفق " + a.name)
+      rm.appendChild(makeSvgIcon(CLOSE_ICON))
+      ;(function (meta) {
+        rm.addEventListener("click", function () {
+          pendingAttachments = pendingAttachments.filter(function (p) {
+            return p !== meta
+          })
+          renderAttachmentPreview()
+        })
+      })(a)
+      chip.appendChild(rm)
+
+      attachPreviewEl.appendChild(chip)
+    }
+
+    if (pendingAttachments.length) {
+      attachPreviewEl.hidden = false
+    } else {
+      attachPreviewEl.hidden = true
+    }
+  }
+
+  function validateFile(file) {
+    if (!file || !file.size) return "الملف فاضي أو مش مقروء."
+    if (file.size > MAX_FILE_BYTES) return "الملف أكبر من 3MB: " + (file.name || "")
+    if (pendingAttachments.length >= MAX_FILES_PER_MESSAGE) return "الحد الأقصى " + MAX_FILES_PER_MESSAGE + " مرفقات للرسالة."
+    return ""
+  }
+
+  function uploadNext(files, index, done) {
+    if (index >= files.length) {
+      done()
+      return
+    }
+    var file = files[index]
+    var pendingError = validateFile(file)
+    if (pendingError) {
+      showTransientError(pendingError)
+      uploadNext(files, index + 1, done)
+      return
+    }
+
+    var mime = mimeOf(file)
+    if (!mime) {
+      showTransientError("صيغة مش مدعومة: " + (file.name || ""))
+      uploadNext(files, index + 1, done)
+      return
+    }
+
+    var chip = document.createElement("div")
+    chip.className = "attach-chip"
+    chip.setAttribute("aria-busy", "true")
+    var label = document.createElement("span")
+    label.className = "attach-name"
+    label.textContent = (file.name || "جاري الرفع") + " …"
+    chip.appendChild(label)
+    attachPreviewEl.appendChild(chip)
+    attachPreviewEl.hidden = false
+
+    readFileAsBase64(file).then(function (base64) {
+      return app.api("/api/upload", {
+        method: "POST",
+        body: { name: file.name || "file", mime: mime, data: base64 }
+      })
+    }).then(function (data) {
+      chip.remove()
+      if (data && data.attachment) {
+        pendingAttachments.push(data.attachment)
+      }
+      renderAttachmentPreview()
+      uploadNext(files, index + 1, done)
+    }).catch(function (err) {
+      chip.remove()
+      showTransientError((err && err.error) || "فشل رفع الملف: " + (file.name || ""))
+      renderAttachmentPreview()
+      uploadNext(files, index + 1, done)
+    })
+  }
+
+  attachBtn.addEventListener("click", function () {
+    if (!app.state.sending) fileInput.click()
+  })
+
+  fileInput.addEventListener("change", function () {
+    var files = Array.prototype.slice.call(fileInput.files || [])
+    fileInput.value = ""
+    if (files.length) uploadNext(files, 0, renderAttachmentPreview)
+  })
+
+  document.addEventListener("paste", function (e) {
+    if (app.state.sending || !chatAreaEl) return
+    var items = (e.clipboardData && e.clipboardData.files) || []
+    if (items.length) {
+      e.preventDefault()
+      uploadNext(Array.prototype.slice.call(items), 0, renderAttachmentPreview)
+    }
   })
 
   var chips = document.querySelectorAll(".chip")

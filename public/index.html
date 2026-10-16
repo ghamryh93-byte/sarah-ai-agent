@@ -187,7 +187,14 @@
       </div>
 
       <footer class="composer">
+        <div class="attach-preview" id="attachPreview" hidden></div>
+        <input id="fileInput" type="file" class="hidden" multiple
+          accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,text/plain,.txt,.md"
+          aria-hidden="true" tabindex="-1">
         <div class="composer-wrap">
+          <button id="attachBtn" type="button" class="btn-attach" aria-label="إرفاق ملف" title="إرفاق ملف">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+          </button>
           <textarea id="messageInput" rows="1" aria-label="اكتب رسالتك هنا" placeholder="اكتب رسالتك هنا…" dir="auto" enterkeyhint="send"></textarea>
           <button id="sendBtn" type="button" class="btn-send" aria-label="إرسال">
             <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg>

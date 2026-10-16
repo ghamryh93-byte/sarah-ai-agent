@@ -1,8 +1,71 @@
 import { webSearch } from "./search"
+import type { MessageAttachment } from "./storage"
 
 type ChatMessage = {
   role: "system" | "user" | "assistant"
   content: string
+  attachments?: MessageAttachment[]
+}
+
+const ATTACHMENT_FETCH_MAX_BYTES = 3.5 * 1024 * 1024
+
+function summarizeAttachmentForText(a: MessageAttachment): string {
+  return `\n\n[المستخدم أرفق ملفاً: ${a.name} — النوع ${a.mime}. النموذج الحالي لا يمكنه قراءة محتوى هذا النوع من الملفات.]`
+}
+
+function textAttachmentContent(a: MessageAttachment, base64: string): string | null {
+  if (!/^(text\/plain|text\/markdown)$/i.test(a.mime)) return null
+  try {
+    const decoded = Buffer.from(base64, "base64").toString("utf8")
+    return decoded.slice(0, 50000)
+  } catch {
+    return null
+  }
+}
+
+// Fetches an attachment from storage and returns raw base64 (for Gemini inline_data)
+async function fetchAttachmentBase64(url: string): Promise<string | null> {
+  const res = await fetch(url, { signal: AbortSignal.timeout(15000) })
+  if (!res.ok) throw new Error(`Attachment fetch failed: ${res.status}`)
+  const buf = Buffer.from(await res.arrayBuffer())
+  if (buf.length > ATTACHMENT_FETCH_MAX_BYTES) return null
+  return buf.toString("base64")
+}
+
+// Expands a message: text-file attachments become fenced inline text,
+// binary attachments (images/PDFs) are returned for Gemini inline_data.
+export async function expandMessageAttachments(
+  message: ChatMessage,
+  opts: { inlineBinaries: boolean; noteBinaries: boolean }
+): Promise<{ content: string; inlineParts: { mime: string; base64: string; name: string }[] }> {
+  const attachments = message.attachments || []
+  let content = message.content
+  const inlineParts: { mime: string; base64: string; name: string }[] = []
+
+  for (const a of attachments) {
+    try {
+      const base64 = await fetchAttachmentBase64(a.url)
+      if (!base64) {
+        content += summarizeAttachmentForText(a)
+        continue
+      }
+      const asText = textAttachmentContent(a, base64)
+      if (asText !== null) {
+        content += `\n\n--- الملف المرفق: ${a.name} ---\n${asText}\n--- نهاية الملف ---`
+        continue
+      }
+      if (opts.inlineBinaries) {
+        inlineParts.push({ mime: a.mime, base64, name: a.name })
+      } else if (opts.noteBinaries) {
+        content += summarizeAttachmentForText(a)
+      }
+    } catch (err) {
+      console.error(`Attachment load failed (${a.name}):`, (err as Error).message)
+      content += `\n\n[تعذر تحميل المرفق: ${a.name}]`
+    }
+  }
+
+  return { content, inlineParts }
 }
 
 type NVIDIAToolCall = {
@@ -49,7 +112,13 @@ export class NVIDIAClient {
   }
 
   async getReply(messages: ChatMessage[]): Promise<string> {
-    const chat: unknown[] = messages.map(m => ({ role: m.role, content: m.content }))
+    const expanded = await Promise.all(
+      messages.map(async m => {
+        const e = await expandMessageAttachments(m, { inlineBinaries: false, noteBinaries: true })
+        return { role: m.role, content: e.content }
+      })
+    )
+    const chat: unknown[] = expanded
     let full = ""
     const executedQueries: string[] = []
 
@@ -228,12 +297,21 @@ export class GeminiClient {
       .map(m => m.content)
       .join("\n\n")
 
-    const nativeContents: unknown[] = messages
-      .filter(m => m.role !== "system")
-      .map(m => ({
-        role: m.role === "assistant" ? "model" : "user",
-        parts: [{ text: m.content }]
-      }))
+    const nativeContents: unknown[] = await Promise.all(
+      messages
+        .filter(m => m.role !== "system")
+        .map(async m => {
+          const e = await expandMessageAttachments(m, { inlineBinaries: true, noteBinaries: false })
+          const parts: unknown[] = e.inlineParts.map(p => ({
+            inline_data: { mime_type: p.mime, data: p.base64 }
+          }))
+          parts.push({ text: e.content })
+          return {
+            role: m.role === "assistant" ? "model" : "user",
+            parts
+          }
+        })
+    )
 
     const webSearchTool = [
       {

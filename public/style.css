@@ -1235,6 +1235,214 @@ textarea#messageInput::placeholder {
   color: var(--c-placeholder);
 }
 
+/* ---------- Attachments ---------- */
+
+.btn-attach {
+  flex-shrink: 0;
+  width: 42px;
+  height: 42px;
+  border: none;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--c-text-soft);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, transform 0.12s ease;
+}
+
+.btn-attach:hover {
+  background: var(--c-primary-light);
+  color: var(--c-primary);
+}
+
+.btn-attach:active {
+  transform: scale(0.92);
+}
+
+.attach-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 820px;
+  margin: 0 auto 8px;
+  padding: 0 2px;
+}
+
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 11px;
+  border: 1px solid var(--c-border);
+  border-radius: 12px;
+  background: var(--c-surface);
+  color: var(--c-text-soft);
+  font-size: 12.5px;
+  box-shadow: var(--shadow-sm);
+  max-width: 100%;
+}
+
+.attach-chip .attach-name {
+  max-width: 160px;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 600;
+  color: var(--c-text);
+  direction: ltr;
+  unicode-bidi: plaintext;
+}
+
+.attach-chip .attach-size {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--c-placeholder);
+  font-variant-numeric: tabular-nums;
+}
+
+.attach-chip.is-error {
+  border-color: var(--c-danger-border);
+  background: var(--c-danger-bg);
+  color: var(--c-danger);
+}
+
+.attach-chip button.rm {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--c-text-soft);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.attach-chip button.rm:hover {
+  background: var(--c-border);
+  color: var(--c-danger);
+}
+
+/* Attachments inside a message bubble */
+
+.bubble .attach-media {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.bubble .attach-media:last-child {
+  margin-bottom: 0;
+}
+
+.msg-attachment {
+  display: block;
+  max-width: min(280px, 100%);
+  border-radius: 12px;
+}
+
+.msg-attachment img {
+  display: block;
+  max-width: min(280px, 100%);
+  max-height: 300px;
+  width: auto;
+  height: auto;
+  border-radius: 12px;
+  border: 1px solid var(--glass-border);
+}
+
+.msg-attachment img.zoomable {
+  cursor: zoom-in;
+}
+
+.file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 13px;
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
+  background: var(--c-muted);
+  color: var(--c-text);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 600;
+  max-width: 100%;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.file-chip:hover {
+  border-color: var(--c-primary);
+  box-shadow: var(--shadow-sm);
+}
+
+.file-chip svg {
+  flex-shrink: 0;
+}
+
+.file-chip .attach-name {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: ltr;
+  unicode-bidi: plaintext;
+}
+
+.file-chip .attach-size {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--c-text-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Lightbox for image attachments */
+
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(4, 12, 32, 0.85);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  cursor: zoom-out;
+}
+
+.lightbox img {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 14px;
+  box-shadow: var(--shadow-lg);
+}
+
+.lightbox-close {
+  position: absolute;
+  top: calc(16px + env(safe-area-inset-top));
+  right: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  cursor: pointer;
+}
+
 /* ---------- Reduced motion ---------- */
 
 @media (prefers-reduced-motion: reduce) {
