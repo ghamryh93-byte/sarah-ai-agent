@@ -630,9 +630,15 @@
   var listening = false
   var dictationBase = ""
   var dictationFinal = ""
+  var recognitionRestartTimer = null
+  var tidyInFlight = false
 
   function stopDictation() {
     listening = false
+    if (recognitionRestartTimer) {
+      clearTimeout(recognitionRestartTimer)
+      recognitionRestartTimer = null
+    }
     if (recognition) {
       try {
         recognition.abort()
@@ -642,6 +648,23 @@
       micBtn.classList.remove("is-listening")
       micBtn.setAttribute("aria-pressed", "false")
     }
+  }
+
+  // Runs the dictated text through Gemini to fix recognition slips and punctuation.
+  // Skipped silently if the user restarted the mic while it runs.
+  function tidyDictation() {
+    var sent = inputEl.value
+    if (!sent.trim() || tidyInFlight) return
+    tidyInFlight = true
+    app.api("/api/transcript/fix", { method: "POST", body: { text: sent } }).then(function (data) {
+      tidyInFlight = false
+      if (!listening && data && typeof data.text === "string" && data.text.trim()) {
+        inputEl.value = data.text
+        autoGrow()
+      }
+    }).catch(function () {
+      tidyInFlight = false
+    })
   }
 
   if (micBtn) {
@@ -681,14 +704,30 @@
       }
 
       recognition.onend = function () {
-        // Browsers stop after silence; reflect the real state.
-        if (listening) stopDictation()
+        // Keep the session alive through short pauses (restarts after silence).
+        if (!listening) return
+        recognitionRestartTimer = setTimeout(function () {
+          if (!listening) return
+          try {
+            recognition.start()
+          } catch (e) {
+            stopDictation()
+          }
+        }, 400)
+      }
+
+      recognition.onstart = function () {
+        if (recognitionRestartTimer) {
+          clearTimeout(recognitionRestartTimer)
+          recognitionRestartTimer = null
+        }
       }
 
       micBtn.addEventListener("click", function () {
         if (app.state.sending) return
         if (listening) {
           stopDictation()
+          tidyDictation()
           return
         }
         dictationBase = inputEl.value ? inputEl.value.replace(/\s*$/, "") + " " : ""

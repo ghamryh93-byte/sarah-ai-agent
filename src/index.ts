@@ -886,6 +886,34 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
         error: "فشل رفع الملف. جرب تاني" + (detail ? ` — سبب محتمل: ${detail}` : "")
       })
     }
+  } else if (req.method === "POST" && pathname === "/api/transcript/fix") {
+    const user = getSessionUser(req.headers.cookie)
+    if (!user) {
+      respondJson(res, 401, { error: "Not authenticated" })
+      return
+    }
+
+    const bodyResult = await readJsonBody(req)
+    if (!bodyResult.ok) {
+      respondJson(res, bodyResult.status, { error: bodyResult.error })
+      return
+    }
+
+    const raw = typeof bodyResult.data.text === "string" ? bodyResult.data.text.trim().slice(0, 4000) : ""
+    if (!raw) {
+      respondJson(res, 200, { text: "" })
+      return
+    }
+
+    try {
+      const gemini = new GeminiClient()
+      const fixed = await gemini.tidyTranscript(raw)
+      respondJson(res, 200, { text: fixed })
+    } catch (err) {
+      console.error("Transcript tidy failed:", err)
+      // Graceful: dictation never breaks because cleanup failed
+      respondJson(res, 200, { text: raw })
+    }
   } else if (req.method === "POST" && pathname === "/api/chat") {
     const user = getSessionUser(req.headers.cookie)
     if (!user) {

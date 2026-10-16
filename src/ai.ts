@@ -397,6 +397,16 @@ export class GeminiClient {
     return full
   }
 
+  // Cleans up raw speech-to-text output (recognition slips, missing punctuation).
+  // Returns only the corrected text — never an answer to what was said.
+  async tidyTranscript(raw: string): Promise<string> {
+    const systemText =
+      "You clean up transcripts produced by speech-to-text. Respond with ONLY the corrected text and nothing else: no commentary, no explanations, no wrapping quotes. Keep the same language and dialect (Egyptian Arabic stays Egyptian Arabic; English stays English; mixed stays mixed). Fix recognition mistakes to their most plausible intended words, add natural punctuation, and fix spacing and typos. Do NOT answer the content, do NOT rephrase the style, do NOT add, remove, or reorder ideas. If the input is empty or unreadable garbage, return it unchanged."
+    const contents = [{ role: "user", parts: [{ text: raw.slice(0, 4000) }] }]
+    const { text } = await this.requestGemini(systemText, contents, null)
+    return text.trim()
+  }
+
   private async requestGemini(
     systemText: string,
     contents: unknown[],
