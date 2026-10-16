@@ -649,6 +649,7 @@
     if (!SpeechRecognitionCtor) {
       micBtn.hidden = true
     } else {
+      micBtn.hidden = false
       recognition = new SpeechRecognitionCtor()
       recognition.lang = "ar-EG"
       recognition.continuous = true
