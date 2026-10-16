@@ -40,6 +40,18 @@
     if (el) el.textContent = message || ""
   }
 
+  // Guidelines: focus the first empty/invalid field after a failed submit
+  function focusFirstField(form) {
+    var fields = form.querySelectorAll("input.field")
+    for (var i = 0; i < fields.length; i++) {
+      if (!fields[i].value) {
+        fields[i].focus()
+        return
+      }
+    }
+    if (fields.length) fields[0].focus()
+  }
+
   function enterChatWith(data) {
     app.state.user = data.user
     app.enterChat()
@@ -62,6 +74,7 @@
     }).catch(function (err) {
       setError("login", (err && err.error) || "حصلت مشكلة، حاول تاني.")
       setBusy(form, false)
+      focusFirstField(form)
     })
   })
 
@@ -75,6 +88,7 @@
 
     if (password !== confirm) {
       setError("register", "الباسورد وتأكيده مش شبه بعض.")
+      focusFirstField(form)
       return
     }
 
@@ -93,6 +107,7 @@
     }).catch(function (err) {
       setError("register", (err && err.error) || "حصلت مشكلة، حاول تاني.")
       setBusy(form, false)
+      focusFirstField(form)
     })
   })
 
@@ -119,6 +134,7 @@
     }).catch(function (err) {
       setBusy(form, false)
       setError("forgot", (err && err.error) || "حصلت مشكلة، حاول تاني.")
+      focusFirstField(form)
     })
   })
 
@@ -133,6 +149,7 @@
 
     if (newPassword !== confirm) {
       setError("reset", "الباسورد وتأكيده مش شبه بعض.")
+      focusFirstField(form)
       return
     }
 
@@ -154,6 +171,7 @@
     }).catch(function (err) {
       setBusy(form, false)
       setError("reset", (err && err.error) || "حصلت مشكلة، حاول تاني.")
+      focusFirstField(form)
     })
   })
 

@@ -145,9 +145,13 @@
     for (var i = 0; i < app.state.conversations.length; i++) {
       var conv = app.state.conversations[i]
 
-      var item = document.createElement("div")
+      var item = document.createElement("button")
+      item.type = "button"
       item.className = "conv-item" + (conv.id === app.state.currentId ? " active" : "")
       item.setAttribute("data-id", conv.id)
+      if (conv.id === app.state.currentId) {
+        item.setAttribute("aria-current", "true")
+      }
 
       var title = document.createElement("div")
       title.className = "conv-title"
@@ -163,6 +167,7 @@
       del.type = "button"
       del.className = "conv-delete"
       del.title = "حذف المحادثة"
+      del.setAttribute("aria-label", "حذف المحادثة: " + (conv.title || "محادثة"))
       del.innerHTML = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>'
 
       del.addEventListener("click", function (e) {
