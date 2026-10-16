@@ -1,18 +1,35 @@
 import fs from "fs"
 import path from "path"
 import crypto from "crypto"
-import { put, list } from "@vercel/blob"
+import { createClient, SupabaseClient } from "@supabase/supabase-js"
 
-const DATA_DIR = process.env.VERCEL
-  ? path.join("/tmp", "data")
-  : (process.env.DATA_DIR || path.join(__dirname, "..", "data"))
-const CONVERSATIONS_DIR = path.join(DATA_DIR, "conversations")
-const USERS_FILE = path.join(DATA_DIR, "users.json")
-const SESSIONS_FILE = path.join(DATA_DIR, "sessions.json")
+// ---------------------------------------------------------------------------
+// Supabase client (server-side — uses service role key, bypasses RLS)
+// ---------------------------------------------------------------------------
+function getSupabaseClient(): SupabaseClient {
+  const url = process.env.SUPABASE_URL
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!url || !key) {
+    throw new Error(
+      "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY environment variables. " +
+      "Please add them in your Vercel project settings."
+    )
+  }
+  return createClient(url, key, {
+    auth: { persistSession: false }
+  })
+}
 
-// Admins list is always read from the repo's /data folder, not /tmp
-const ADMINS_FILE = path.join(__dirname, "..", "data", "admins.json")
+// Lazy singleton — created once per process (cold-start safe on Vercel)
+let _supabase: SupabaseClient | null = null
+function supabase(): SupabaseClient {
+  if (!_supabase) _supabase = getSupabaseClient()
+  return _supabase
+}
 
+// ---------------------------------------------------------------------------
+// Types (unchanged public surface — auth.ts and index.ts depend on these)
+// ---------------------------------------------------------------------------
 export type UserRecord = {
   id: string
   fullName: string
@@ -48,304 +65,83 @@ export type ConversationRecord = {
   messages: ConversationMessage[]
 }
 
-let users: UserRecord[] = []
-let sessions: SessionRecord[] = []
-let initialized = false
+// ---------------------------------------------------------------------------
+// In-memory caches (populated lazily; kept in sync via write-through)
+// ---------------------------------------------------------------------------
+let usersCache: UserRecord[] = []
+let sessionsCache: SessionRecord[] = []
+let usersLoaded = false
+let sessionsLoaded = false
 
 const CONVERSATION_ID_PATTERN = /^[a-zA-Z0-9_-]+$/
 const SESSION_KEEP_AFTER_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000
 
-function ensureDir(dir: string): void {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true })
+// ---------------------------------------------------------------------------
+// Row mappers (snake_case DB <-> camelCase TS)
+// ---------------------------------------------------------------------------
+function rowToUser(row: any): UserRecord {
+  return {
+    id: row.id,
+    fullName: row.full_name,
+    email: row.email,
+    passwordHash: row.password_hash,
+    createdAt: row.created_at,
+    resetCodeHash: row.reset_code_hash ?? undefined,
+    resetCodeExpiresAt: row.reset_code_expires_at ?? undefined,
+    resetCodeAttempts: row.reset_code_attempts ?? undefined
   }
 }
 
-function atomicWriteFile(file: string, content: string): void {
-  const tmpFile = `${file}.tmp`
-  fs.writeFileSync(tmpFile, content, "utf8")
-  fs.renameSync(tmpFile, file)
-}
-
-function getBlobToken(): string | undefined {
-  if (process.env.BLOB_READ_WRITE_TOKEN) {
-    return process.env.BLOB_READ_WRITE_TOKEN.trim()
-  }
-  // Detect any token with custom prefix or standard Vercel format
-  for (const [key, val] of Object.entries(process.env)) {
-    if (typeof val === "string" && val.trim().startsWith("vercel_blob_rw_")) {
-      return val.trim()
-    }
-    if (key.includes("BLOB") && (key.includes("TOKEN") || key.endsWith("_READ_WRITE_TOKEN"))) {
-      if (typeof val === "string" && val.trim().length > 10) {
-        return val.trim()
-      }
-    }
-  }
-  return undefined
-}
-
-function getBlobStoreId(): string | undefined {
-  return process.env.BLOB_STORE_ID?.trim() || undefined
-}
-
-function hasBlobConfigured(): boolean {
-  return Boolean(getBlobToken() || getBlobStoreId())
-}
-
-function getKvUrl(): string | undefined {
-  return process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL
-}
-
-function getKvToken(): string | undefined {
-  return process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN
-}
-
-function hasCloudConfigured(): boolean {
-  return Boolean(hasBlobConfigured() || (getKvUrl() && getKvToken()))
-}
-
-function blobOptions(): Record<string, any> {
-  const token = getBlobToken()
-  const storeId = getBlobStoreId()
-  if (token) return { token }
-  if (storeId) return { storeId }
-  return {}
-}
-
-async function blobGet<T>(pathname: string): Promise<T | null> {
-  if (!hasBlobConfigured()) return null
-  try {
-    const opts = blobOptions()
-    const { blobs } = await list({ prefix: pathname, ...opts })
-    if (!blobs || blobs.length === 0) return null
-    const matching = blobs.filter((b: any) => b.pathname === pathname)
-    const exact = matching.length > 0
-      ? matching.sort((a: any, b: any) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime())[0]
-      : blobs[0]
-    const targetUrl = exact.downloadUrl || exact.url
-    const fetchFn = typeof fetch !== "undefined" ? fetch : require("node-fetch")
-    const res = await fetchFn(`${targetUrl}?t=${Date.now()}`, {
-      headers: {
-        "Cache-Control": "no-cache",
-        Pragma: "no-cache"
-      }
-    })
-    if (!res.ok) {
-      console.warn(`Blob fetch returned HTTP ${res.status} for ${pathname}`)
-      return null
-    }
-    return (await res.json()) as T
-  } catch (err) {
-    console.error(`Blob read error for ${pathname}:`, (err as Error).message)
-    return null
+function userToRow(user: UserRecord): Record<string, any> {
+  return {
+    id: user.id,
+    full_name: user.fullName,
+    email: user.email,
+    password_hash: user.passwordHash,
+    created_at: user.createdAt,
+    reset_code_hash: user.resetCodeHash ?? null,
+    reset_code_expires_at: user.resetCodeExpiresAt ?? null,
+    reset_code_attempts: user.resetCodeAttempts ?? null
   }
 }
 
-async function blobSet(pathname: string, data: any): Promise<void> {
-  if (!hasBlobConfigured()) {
-    console.warn(`blobSet skipped: no Blob credentials (BLOB_READ_WRITE_TOKEN or BLOB_STORE_ID) found`)
-    return
-  }
-  try {
-    const opts = blobOptions()
-    const result = await put(pathname, JSON.stringify(data), {
-      access: "public",
-      addRandomSuffix: false,
-      allowOverwrite: true,
-      contentType: "application/json",
-      ...opts
-    })
-    console.log(`Blob successfully saved for ${pathname}: ${result.url}`)
-  } catch (err) {
-    console.error(`Blob write error for ${pathname}:`, (err as Error).message)
+function rowToSession(row: any): SessionRecord {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    createdAt: row.created_at,
+    expiresAt: Number(row.expires_at),
+    lastSeenAt: Number(row.last_seen_at),
+    revokedAt: row.revoked_at !== null ? Number(row.revoked_at) : null
   }
 }
 
+function sessionToRow(s: SessionRecord): Record<string, any> {
+  return {
+    id: s.id,
+    user_id: s.userId,
+    created_at: s.createdAt,
+    expires_at: s.expiresAt,
+    last_seen_at: s.lastSeenAt,
+    revoked_at: s.revokedAt
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Storage engine info
+// ---------------------------------------------------------------------------
 export function getStorageEngineInfo(): { engine: string; connected: boolean; persistent: boolean } {
-  if (getBlobToken()) {
-    return { engine: "Vercel Blob (token auth)", connected: true, persistent: true }
+  const hasUrl = Boolean(process.env.SUPABASE_URL)
+  const hasKey = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY)
+  if (hasUrl && hasKey) {
+    return { engine: "Supabase PostgreSQL", connected: true, persistent: true }
   }
-  if (getBlobStoreId()) {
-    return { engine: "Vercel Blob (store ID / OIDC)", connected: true, persistent: true }
-  }
-  if (getKvUrl() && getKvToken()) {
-    return { engine: "Vercel KV / Upstash Redis", connected: true, persistent: true }
-  }
-  if (!process.env.VERCEL) {
-    return { engine: "Local Filesystem (/data)", connected: true, persistent: true }
-  }
-  return { engine: "Local Ephemeral (/tmp, No Persistent Database Connected)", connected: false, persistent: false }
+  return { engine: "Supabase (not configured — missing env vars)", connected: false, persistent: false }
 }
 
-async function kvGet<T>(key: string): Promise<T | null> {
-  const kvUrl = getKvUrl()
-  const kvToken = getKvToken()
-  if (!kvUrl || !kvToken) return null
-  try {
-    const fetchFn = typeof fetch !== "undefined" ? fetch : require("node-fetch")
-    const res = await fetchFn(`${kvUrl}/get/${encodeURIComponent(key)}`, {
-      headers: { Authorization: `Bearer ${kvToken}` }
-    })
-    if (!res.ok) return null
-    const json = (await res.json()) as { result?: any }
-    if (!json.result) return null
-    return typeof json.result === "string" ? JSON.parse(json.result) : json.result
-  } catch (err) {
-    console.error(`KV get error for ${key}:`, (err as Error).message)
-    return null
-  }
-}
-
-async function kvSet(key: string, value: any): Promise<void> {
-  const kvUrl = getKvUrl()
-  const kvToken = getKvToken()
-  if (!kvUrl || !kvToken) return
-  try {
-    const fetchFn = typeof fetch !== "undefined" ? fetch : require("node-fetch")
-    await fetchFn(`${kvUrl}/set/${encodeURIComponent(key)}`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${kvToken}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(typeof value === "string" ? value : JSON.stringify(value))
-    })
-  } catch (err) {
-    console.error(`KV set error for ${key}:`, (err as Error).message)
-  }
-}
-
-export async function persistUsersAsync(): Promise<void> {
-  atomicWriteFile(USERS_FILE, JSON.stringify({ users }, null, 2))
-  const kvUrl = getKvUrl()
-  const kvToken = getKvToken()
-  if (kvUrl && kvToken) {
-    await kvSet("sarah:users", users).catch(() => {})
-  }
-  if (getBlobToken()) {
-    await blobSet("data/users.json", users).catch(() => {})
-  }
-}
-
-function persistUsers(): void {
-  atomicWriteFile(USERS_FILE, JSON.stringify({ users }, null, 2))
-  persistUsersAsync().catch(() => {})
-}
-
-function purgeSessions(): void {
-  const cutoff = Date.now() - SESSION_KEEP_AFTER_EXPIRY_MS
-  sessions = sessions.filter(s => s.revokedAt === null && s.expiresAt > cutoff)
-}
-
-export async function persistSessionsAsync(): Promise<void> {
-  purgeSessions()
-  atomicWriteFile(SESSIONS_FILE, JSON.stringify({ sessions }, null, 2))
-  const kvUrl = getKvUrl()
-  const kvToken = getKvToken()
-  if (kvUrl && kvToken) {
-    await kvSet("sarah:sessions", sessions).catch(() => {})
-  }
-  if (getBlobToken()) {
-    await blobSet("data/sessions.json", sessions).catch(() => {})
-  }
-}
-
-export function persistSessions(): void {
-  purgeSessions()
-  atomicWriteFile(SESSIONS_FILE, JSON.stringify({ sessions }, null, 2))
-  persistSessionsAsync().catch(() => {})
-}
-
-let lastSyncTime = 0
-const SYNC_INTERVAL_MS = 2000
-
-export async function syncStorageWithCloud(force = false): Promise<void> {
-  if (!hasCloudConfigured()) return
-  const now = Date.now()
-  if (!force && now - lastSyncTime < SYNC_INTERVAL_MS) return
-  lastSyncTime = now
-
-  try {
-    let cloudUsers: UserRecord[] | null = null
-    if (getBlobToken()) {
-      cloudUsers = await blobGet<UserRecord[]>("data/users.json")
-    } else if (getKvUrl() && getKvToken()) {
-      cloudUsers = await kvGet<UserRecord[]>("sarah:users")
-    }
-
-    if (cloudUsers && Array.isArray(cloudUsers)) {
-      const userMap = new Map<string, UserRecord>()
-      for (const u of cloudUsers) {
-        if (u && u.id && u.email) userMap.set(u.id, u)
-      }
-      for (const u of users) {
-        if (u && u.id && u.email && !userMap.has(u.id)) {
-          userMap.set(u.id, u)
-        }
-      }
-      users = Array.from(userMap.values())
-      atomicWriteFile(USERS_FILE, JSON.stringify({ users }, null, 2))
-    }
-
-    let cloudSessions: SessionRecord[] | null = null
-    if (getBlobToken()) {
-      cloudSessions = await blobGet<SessionRecord[]>("data/sessions.json")
-    } else if (getKvUrl() && getKvToken()) {
-      cloudSessions = await kvGet<SessionRecord[]>("sarah:sessions")
-    }
-
-    if (cloudSessions && Array.isArray(cloudSessions)) {
-      const idMap = new Map<string, SessionRecord>()
-      for (const s of cloudSessions) {
-        if (s && s.id) idMap.set(s.id, s)
-      }
-      for (const s of sessions) {
-        if (s && s.id && !idMap.has(s.id)) {
-          idMap.set(s.id, s)
-        }
-      }
-      sessions = Array.from(idMap.values())
-      purgeSessions()
-      atomicWriteFile(SESSIONS_FILE, JSON.stringify({ sessions }, null, 2))
-    }
-  } catch (err) {
-    console.error("Cloud storage sync error:", (err as Error).message)
-  }
-}
-
-export function initStorage(): void {
-  if (initialized) return
-  initialized = true
-
-  ensureDir(DATA_DIR)
-  ensureDir(CONVERSATIONS_DIR)
-
-  if (fs.existsSync(USERS_FILE)) {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(USERS_FILE, "utf8")) as { users?: UserRecord[] }
-      users = Array.isArray(parsed.users) ? parsed.users : []
-    } catch {
-      users = []
-    }
-  } else {
-    // Write empty local file only; DO NOT call persistUsers() which would overwrite cloud DB with empty array
-    atomicWriteFile(USERS_FILE, JSON.stringify({ users: [] }, null, 2))
-  }
-
-  if (fs.existsSync(SESSIONS_FILE)) {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(SESSIONS_FILE, "utf8")) as { sessions?: SessionRecord[] }
-      sessions = Array.isArray(parsed.sessions) ? parsed.sessions : []
-    } catch {
-      sessions = []
-    }
-  } else {
-    // Write empty local file only; DO NOT call persistSessions() which would overwrite cloud DB with empty array
-    atomicWriteFile(SESSIONS_FILE, JSON.stringify({ sessions: [] }, null, 2))
-  }
-}
-
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 export function generateId(prefix: string): string {
   return `${prefix}_${crypto.randomBytes(12).toString("hex")}`
 }
@@ -354,117 +150,213 @@ export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase()
 }
 
+// ---------------------------------------------------------------------------
+// No-op stubs kept for backward-compat with callers in index.ts / auth.ts
+// ---------------------------------------------------------------------------
+export async function syncStorageWithCloud(_force = false): Promise<void> {
+  // With Supabase we read/write directly — no batch sync needed
+}
+
+export async function persistUsersAsync(): Promise<void> {
+  // Write-through on every mutation — nothing to flush
+}
+
+export async function persistSessionsAsync(): Promise<void> {
+  // Write-through on every mutation — nothing to flush
+}
+
+export function persistSessions(): void {
+  // Write-through on every mutation — nothing to flush
+}
+
+// ---------------------------------------------------------------------------
+// User operations
+// ---------------------------------------------------------------------------
+async function loadUsers(): Promise<void> {
+  if (usersLoaded) return
+  const { data, error } = await supabase().from("users").select("*")
+  if (error) throw new Error(`Supabase loadUsers error: ${error.message}`)
+  usersCache = (data ?? []).map(rowToUser)
+  usersLoaded = true
+}
+
 export function findUserByEmail(email: string): UserRecord | undefined {
   const normalized = normalizeEmail(email)
-  return users.find(u => u.email === normalized)
+  return usersCache.find(u => u.email === normalized)
 }
 
 export function findUserById(id: string): UserRecord | undefined {
-  return users.find(u => u.id === id)
+  return usersCache.find(u => u.id === id)
 }
 
-export function addUser(user: UserRecord): void {
-  users.push(user)
-  persistUsers()
+export async function addUser(user: UserRecord): Promise<void> {
+  const { error } = await supabase().from("users").insert(userToRow(user))
+  if (error) throw new Error(`Supabase addUser error: ${error.message}`)
+  usersCache.push(user)
 }
 
-export function updateUser(user: UserRecord): void {
-  const index = users.findIndex(u => u.id === user.id)
-  if (index === -1) return
-  users[index] = user
-  persistUsers()
-}
-
-export function revokeAllSessionsForUser(userId: string): void {
-  const now = Date.now()
-  for (const session of sessions) {
-    if (session.userId === userId && session.revokedAt === null) {
-      session.revokedAt = now
-    }
-  }
-  persistSessions()
-}
-
-export function findSessionById(id: string): SessionRecord | undefined {
-  return sessions.find(s => s.id === id)
-}
-
-export function addSession(session: SessionRecord): void {
-  sessions.push(session)
-  persistSessions()
-}
-
-export function listConversationIds(): string[] {
-  return fs
-    .readdirSync(CONVERSATIONS_DIR)
-    .filter(f => f.endsWith(".json"))
-    .map(f => f.slice(0, -".json".length))
-}
-
-export function readConversation(id: string): ConversationRecord | null {
-  if (!CONVERSATION_ID_PATTERN.test(id)) return null
-  const file = path.join(CONVERSATIONS_DIR, `${id}.json`)
-  if (!fs.existsSync(file)) return null
-  try {
-    return JSON.parse(fs.readFileSync(file, "utf8")) as ConversationRecord
-  } catch {
-    return null
-  }
-}
-
-export function listConversationsForUser(userId: string): ConversationRecord[] {
-  const result: ConversationRecord[] = []
-  for (const id of listConversationIds()) {
-    const conversation = readConversation(id)
-    if (conversation && conversation.userId === userId) {
-      result.push(conversation)
-    }
-  }
-  return result.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
-}
-
-export function writeConversation(conversation: ConversationRecord): void {
-  if (!CONVERSATION_ID_PATTERN.test(conversation.id)) {
-    throw new Error("Invalid conversation id")
-  }
-  atomicWriteFile(
-    path.join(CONVERSATIONS_DIR, `${conversation.id}.json`),
-    JSON.stringify(conversation, null, 2)
-  )
-}
-
-export function deleteConversation(id: string): boolean {
-  if (!CONVERSATION_ID_PATTERN.test(id)) return false
-  const file = path.join(CONVERSATIONS_DIR, `${id}.json`)
-  if (!fs.existsSync(file)) return false
-  fs.unlinkSync(file)
-  return true
+export async function updateUser(user: UserRecord): Promise<void> {
+  const { error } = await supabase()
+    .from("users")
+    .upsert(userToRow(user), { onConflict: "id" })
+  if (error) throw new Error(`Supabase updateUser error: ${error.message}`)
+  const idx = usersCache.findIndex(u => u.id === user.id)
+  if (idx !== -1) usersCache[idx] = user
+  else usersCache.push(user)
 }
 
 export function getAllUsers(): Omit<UserRecord, "passwordHash" | "resetCodeHash" | "resetCodeExpiresAt" | "resetCodeAttempts">[] {
-  return users.map(({ id, fullName, email, createdAt }) => ({ id, fullName, email, createdAt }))
+  return usersCache.map(({ id, fullName, email, createdAt }) => ({ id, fullName, email, createdAt }))
 }
 
-export function listAllConversations(): ConversationRecord[] {
-  const result: ConversationRecord[] = []
-  for (const id of listConversationIds()) {
-    const conv = readConversation(id)
-    if (conv) result.push(conv)
-  }
-  return result.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
+// ---------------------------------------------------------------------------
+// Session operations
+// ---------------------------------------------------------------------------
+async function loadSessions(): Promise<void> {
+  if (sessionsLoaded) return
+  const cutoff = Date.now() - SESSION_KEEP_AFTER_EXPIRY_MS
+  const { data, error } = await supabase()
+    .from("sessions")
+    .select("*")
+    .or(`revoked_at.is.null,expires_at.gt.${cutoff}`)
+  if (error) throw new Error(`Supabase loadSessions error: ${error.message}`)
+  sessionsCache = (data ?? []).map(rowToSession)
+  sessionsLoaded = true
 }
+
+export function findSessionById(id: string): SessionRecord | undefined {
+  return sessionsCache.find(s => s.id === id)
+}
+
+export async function addSession(session: SessionRecord): Promise<void> {
+  const { error } = await supabase().from("sessions").insert(sessionToRow(session))
+  if (error) throw new Error(`Supabase addSession error: ${error.message}`)
+  sessionsCache.push(session)
+}
+
+export async function revokeAllSessionsForUser(userId: string): Promise<void> {
+  const now = Date.now()
+  const { error } = await supabase()
+    .from("sessions")
+    .update({ revoked_at: now })
+    .eq("user_id", userId)
+    .is("revoked_at", null)
+  if (error) throw new Error(`Supabase revokeAllSessions error: ${error.message}`)
+  for (const s of sessionsCache) {
+    if (s.userId === userId && s.revokedAt === null) {
+      s.revokedAt = now
+    }
+  }
+}
+
+export async function flushSession(session: SessionRecord): Promise<void> {
+  const { error } = await supabase()
+    .from("sessions")
+    .update({ last_seen_at: session.lastSeenAt, expires_at: session.expiresAt })
+    .eq("id", session.id)
+  if (error) console.error(`Supabase flushSession error: ${error.message}`)
+}
+
+export async function revokeSession(session: SessionRecord): Promise<void> {
+  const { error } = await supabase()
+    .from("sessions")
+    .update({ revoked_at: session.revokedAt })
+    .eq("id", session.id)
+  if (error) console.error(`Supabase revokeSession error: ${error.message}`)
+}
+
+// ---------------------------------------------------------------------------
+// Conversation operations
+// ---------------------------------------------------------------------------
+export async function listConversationsForUser(userId: string): Promise<ConversationRecord[]> {
+  const { data, error } = await supabase()
+    .from("conversations")
+    .select("*")
+    .eq("user_id", userId)
+    .order("updated_at", { ascending: false })
+  if (error) throw new Error(`Supabase listConversations error: ${error.message}`)
+  return (data ?? []).map(rowToConversation)
+}
+
+export async function readConversation(id: string): Promise<ConversationRecord | null> {
+  if (!CONVERSATION_ID_PATTERN.test(id)) return null
+  const { data, error } = await supabase()
+    .from("conversations")
+    .select("*")
+    .eq("id", id)
+    .maybeSingle()
+  if (error) throw new Error(`Supabase readConversation error: ${error.message}`)
+  return data ? rowToConversation(data) : null
+}
+
+export async function writeConversation(conversation: ConversationRecord): Promise<void> {
+  if (!CONVERSATION_ID_PATTERN.test(conversation.id)) {
+    throw new Error("Invalid conversation id")
+  }
+  const { error } = await supabase()
+    .from("conversations")
+    .upsert(conversationToRow(conversation), { onConflict: "id" })
+  if (error) throw new Error(`Supabase writeConversation error: ${error.message}`)
+}
+
+export async function deleteConversation(id: string): Promise<boolean> {
+  if (!CONVERSATION_ID_PATTERN.test(id)) return false
+  const { data, error } = await supabase()
+    .from("conversations")
+    .delete()
+    .eq("id", id)
+    .select("id")
+  if (error) throw new Error(`Supabase deleteConversation error: ${error.message}`)
+  return (data ?? []).length > 0
+}
+
+export async function listAllConversations(): Promise<ConversationRecord[]> {
+  const { data, error } = await supabase()
+    .from("conversations")
+    .select("*")
+    .order("updated_at", { ascending: false })
+  if (error) throw new Error(`Supabase listAllConversations error: ${error.message}`)
+  return (data ?? []).map(rowToConversation)
+}
+
+function rowToConversation(row: any): ConversationRecord {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    title: row.title,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    messages: Array.isArray(row.messages) ? row.messages : []
+  }
+}
+
+function conversationToRow(c: ConversationRecord): Record<string, any> {
+  return {
+    id: c.id,
+    user_id: c.userId,
+    title: c.title,
+    created_at: c.createdAt,
+    updated_at: c.updatedAt,
+    messages: c.messages
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Admin check (unchanged — env var + data/admins.json + built-in fallback)
+// ---------------------------------------------------------------------------
+const ADMINS_FILE = path.join(__dirname, "..", "data", "admins.json")
 
 export function isAdminEmail(email: string): boolean {
   if (!email) return false
   const normalized = email.trim().toLowerCase()
 
-  // 1. Check environment variable ADMIN_EMAILS (e.g. from Vercel: "email1,email2")
+  // 1. ADMIN_EMAILS env var (comma-separated)
   if (process.env.ADMIN_EMAILS) {
     const envAdmins = process.env.ADMIN_EMAILS.split(",").map(e => e.trim().toLowerCase()).filter(Boolean)
     if (envAdmins.includes(normalized)) return true
   }
 
-  // 2. Check data/admins.json file
+  // 2. data/admins.json file
   try {
     if (fs.existsSync(ADMINS_FILE)) {
       const parsed = JSON.parse(fs.readFileSync(ADMINS_FILE, "utf8")) as { admins?: string[] }
@@ -472,12 +364,21 @@ export function isAdminEmail(email: string): boolean {
       if (fileAdmins.includes(normalized)) return true
     }
   } catch {
-    // continue to fallback
+    // fall through
   }
 
-  // 3. Built-in default admins fallback
+  // 3. Built-in default admins
   const defaultAdmins = ["ghmaryh93@gmail.com", "ghamryh93@gmail.com", "gumballsir3@gmail.com"]
   return defaultAdmins.includes(normalized)
+}
+
+// ---------------------------------------------------------------------------
+// Boot: warm up caches on first import (non-blocking)
+// ---------------------------------------------------------------------------
+export function initStorage(): void {
+  Promise.all([loadUsers(), loadSessions()]).catch(err => {
+    console.error("Supabase warm-up error:", (err as Error).message)
+  })
 }
 
 initStorage()

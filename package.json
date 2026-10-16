@@ -13,6 +13,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@supabase/supabase-js": "^2.118.0",
     "@types/node": "^26.6.3",
     "@vercel/blob": "^2.8.1",
     "dotenv": "^18.0.5",

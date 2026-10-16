@@ -76,7 +76,7 @@ export function hashSessionToken(token: string): string {
   return crypto.createHash("sha256").update(token).digest("hex")
 }
 
-export function createSession(userId: string): { token: string; session: SessionRecord } {
+export async function createSession(userId: string): Promise<{ token: string; session: SessionRecord }> {
   const token = crypto.randomBytes(32).toString("hex")
   const now = Date.now()
   const session: SessionRecord = {
@@ -87,7 +87,7 @@ export function createSession(userId: string): { token: string; session: Session
     lastSeenAt: now,
     revokedAt: null
   }
-  addSession(session)
+  await addSession(session)
   return { token, session }
 }
 
@@ -204,7 +204,7 @@ export type RegisterResult =
   | { ok: true; user: UserRecord }
   | { ok: false; error: "DUPLICATE_EMAIL" }
 
-export function registerUser(input: RegistrationInput): RegisterResult {
+export async function registerUser(input: RegistrationInput): Promise<RegisterResult> {
   const email = normalizeEmail(input.email)
 
   if (findUserByEmail(email)) {
@@ -219,7 +219,7 @@ export function registerUser(input: RegistrationInput): RegisterResult {
     createdAt: new Date().toISOString()
   }
 
-  addUser(user)
+  await addUser(user)
   return { ok: true, user }
 }
 
@@ -245,7 +245,7 @@ function safeEqualHex(a: string, b: string): boolean {
   return bufferA.length === bufferB.length && crypto.timingSafeEqual(bufferA, bufferB)
 }
 
-export function issuePasswordReset(email: string): { code: string; user: UserRecord } | null {
+export async function issuePasswordReset(email: string): Promise<{ code: string; user: UserRecord } | null> {
   const user = findUserByEmail(email)
   if (!user) return null
 
@@ -253,14 +253,14 @@ export function issuePasswordReset(email: string): { code: string; user: UserRec
   user.resetCodeHash = hashSessionToken(code)
   user.resetCodeExpiresAt = Date.now() + RESET_CODE_TTL_MS
   user.resetCodeAttempts = 0
-  updateUser(user)
+  await updateUser(user)
 
   return { code, user }
 }
 
 export type ConsumeResetResult = "OK" | "INVALID" | "EXPIRED" | "TOO_MANY_ATTEMPTS"
 
-export function consumePasswordReset(email: string, code: string, newPassword: string): ConsumeResetResult {
+export async function consumePasswordReset(email: string, code: string, newPassword: string): Promise<ConsumeResetResult> {
   const user = findUserByEmail(email)
   if (!user) return "INVALID"
   if (!user.resetCodeHash || !user.resetCodeExpiresAt) return "INVALID"
@@ -271,7 +271,7 @@ export function consumePasswordReset(email: string, code: string, newPassword: s
 
   if (!safeEqualHex(hashSessionToken(code), user.resetCodeHash)) {
     user.resetCodeAttempts = attempts + 1
-    updateUser(user)
+    await updateUser(user)
     return "INVALID"
   }
 
@@ -279,8 +279,8 @@ export function consumePasswordReset(email: string, code: string, newPassword: s
   user.resetCodeHash = undefined
   user.resetCodeExpiresAt = undefined
   user.resetCodeAttempts = undefined
-  updateUser(user)
-  revokeAllSessionsForUser(user.id)
+  await updateUser(user)
+  await revokeAllSessionsForUser(user.id)
 
   return "OK"
 }

@@ -614,13 +614,13 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       return
     }
 
-    const result = registerUser(input)
+    const result = await registerUser(input)
     if (!result.ok) {
       respondJson(res, 409, { error: "An account with this email already exists." })
       return
     }
 
-    const session = createSession(result.user.id)
+    const session = await createSession(result.user.id)
     console.log(`Auth: user registered (${result.user.id})`)
     await persistUsersAsync()
     await persistSessionsAsync()
@@ -655,7 +655,7 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       return
     }
 
-    const session = createSession(user.id)
+    const session = await createSession(user.id)
     console.log(`Auth: login ok (${user.id})`)
     await persistSessionsAsync()
 
@@ -694,7 +694,7 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       return
     }
 
-    const issued = issuePasswordReset(data.email)
+    const issued = await issuePasswordReset(data.email)
     if (issued) {
       console.log(`Auth: reset code issued (${issued.user.id})`)
       if (isMailerConfigured()) {
@@ -731,7 +731,7 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       return
     }
 
-    const result = consumePasswordReset(data.email, data.code, data.newPassword)
+    const result = await consumePasswordReset(data.email, data.code, data.newPassword)
 
     if (result === "OK") {
       console.log("Auth: password reset completed")
@@ -751,7 +751,7 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       return
     }
     const allUsers = getAllUsers()
-    const allConversations = listAllConversations()
+    const allConversations = await listAllConversations()
     const userMap: Record<string, string> = {}
     for (const u of allUsers) userMap[u.id] = u.fullName
 
@@ -784,7 +784,7 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       updatedAt: now,
       messages: []
     }
-    writeConversation(conversation)
+    await writeConversation(conversation)
     respondJson(res, 201, { conversation })
   } else if (req.method === "POST" && pathname === "/api/chat") {
     const user = getSessionUser(req.headers.cookie)
@@ -810,7 +810,7 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       return
     }
 
-    const conversation = readConversation(data.conversationId)
+    const conversation = await readConversation(data.conversationId)
     if (!conversation || conversation.userId !== user.id) {
       respondJson(res, 404, { error: "Conversation not found." })
       return
@@ -841,7 +841,7 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
         ts: new Date().toISOString()
       })
       conversation.updatedAt = new Date().toISOString()
-      writeConversation(conversation)
+      await writeConversation(conversation)
 
       respondJson(res, 200, {
         reply: finalReply,
@@ -956,7 +956,7 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
     const parts = pathname.split("/").filter(Boolean)
 
     if (req.method === "GET" && parts.length === 2) {
-      const conversations = listConversationsForUser(user.id)
+      const conversations = await listConversationsForUser(user.id)
       respondJson(res, 200, {
         conversations: conversations.map(c => ({
           id: c.id,
@@ -969,7 +969,7 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
     }
 
     if (parts.length === 3) {
-      const conversation = readConversation(parts[2])
+      const conversation = await readConversation(parts[2])
 
       if (!conversation || conversation.userId !== user.id) {
         respondJson(res, 404, { error: "Conversation not found." })
@@ -979,7 +979,7 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       if (req.method === "GET") {
         respondJson(res, 200, { conversation })
       } else {
-        deleteConversation(conversation.id)
+        await deleteConversation(conversation.id)
         respondJson(res, 200, { ok: true })
       }
       return
