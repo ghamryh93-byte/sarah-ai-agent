@@ -3,9 +3,21 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <meta name="theme-color" content="#0b2e6e">
+  <meta name="theme-color" content="#f8fafc">
   <meta name="description" content="سارة - مساعدة Youth Science Club الذكية. اسأل عن YSC، عن العلم، أو أي حاجة في بالك.">
   <title>سارة — Youth Science Club</title>
+  <script>
+    // Set theme before first paint (no flash)
+    (function () {
+      try {
+        var t = localStorage.getItem("sarah-theme")
+        if (t !== "light" && t !== "dark") {
+          t = (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light"
+        }
+        document.documentElement.setAttribute("data-theme", t)
+      } catch (e) {}
+    })()
+  </script>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -13,6 +25,11 @@
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+
+  <button id="themeToggle" class="theme-toggle" type="button" aria-label="تبديل بين الوضع النهاري والليلي" hidden>
+    <svg class="icon-moon" viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+    <svg class="icon-sun" viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+  </button>
 
   <div id="authView" class="auth-view hidden">
     <div class="auth-card">

@@ -79,4 +79,76 @@
   }
 
   window.SarahApp = SarahApp
+
+  /* ---------- Theme: light / dark (auto + persisted) ---------- */
+
+  SarahApp.theme = (function () {
+    "use strict"
+
+    var KEY = "sarah-theme"
+    var THEME_COLORS = { light: "#f8fafc", dark: "#0a1220" }
+
+    var meta = document.querySelector('meta[name="theme-color"]')
+
+    function system() {
+      return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches
+        ? "dark"
+        : "light"
+    }
+
+    function saved() {
+      try {
+        return localStorage.getItem(KEY)
+      } catch (e) {
+        return null
+      }
+    }
+
+    function current() {
+      var s = saved()
+      return s === "light" || s === "dark" ? s : system()
+    }
+
+    function apply(t) {
+      if (t !== "light" && t !== "dark") t = "light"
+      document.documentElement.setAttribute("data-theme", t)
+      if (meta) meta.setAttribute("content", THEME_COLORS[t])
+    }
+
+    function toggle() {
+      var next = current() === "dark" ? "light" : "dark"
+      try {
+        localStorage.setItem(KEY, next)
+      } catch (e) {}
+      apply(next)
+      dispatchEvent(new CustomEvent("sarah:themechange", { detail: next }))
+    }
+
+    function init() {
+      apply(current())
+
+      var btn = document.getElementById("themeToggle")
+      if (btn) {
+        btn.hidden = false
+        btn.addEventListener("click", toggle)
+      }
+
+      if (window.matchMedia) {
+        var mq = window.matchMedia("(prefers-color-scheme: dark)")
+        var onChange = function () {
+          if (saved() === null) apply(system())
+        }
+        if (mq.addEventListener) mq.addEventListener("change", onChange)
+        else if (mq.addListener) mq.addListener(onChange)
+      }
+    }
+
+    return { init: init, apply: apply, toggle: toggle, current: current }
+  })()
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", SarahApp.theme.init)
+  } else {
+    SarahApp.theme.init()
+  }
 })()
