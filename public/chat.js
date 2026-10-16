@@ -324,7 +324,7 @@
     app.state.currentTitle = ""
     messagesEl.innerHTML = ""
     hideError()
-    if (listening) stopDictation()
+    if (recording) stopRecording()
     pendingAttachments = []
     renderAttachmentPreview()
     app.show(welcomeEl)
@@ -361,7 +361,7 @@
 
   function doSend(text, isRetry, retryAttachments) {
     text = (text || "").trim()
-    if (listening) stopDictation()
+    if (recording) stopRecording()
 
     var attachments = isRetry ? (retryAttachments || []) : pendingAttachments.slice()
     if ((!text && !attachments.length) || app.state.sending) return
@@ -623,123 +623,166 @@
   })
 
   // ---------------------------------------------------------------------------
-  // Voice input (Web Speech API — dictation into the composer)
+  // Voice input: record your voice → Gemini transcribes it directly.
+  // Strong Egyptian Arabic accuracy (no browser speech engine, no rewrite pass).
   // ---------------------------------------------------------------------------
   var micBtn = app.$("micBtn")
-  var recognition = null
-  var listening = false
-  var dictationBase = ""
-  var dictationFinal = ""
-  var recognitionRestartTimer = null
-  var tidyInFlight = false
+  var recording = false
+  var busyProcessing = false
+  var recorder = null
+  var micStream = null
+  var recordedChunks = []
 
-  function stopDictation() {
-    listening = false
-    if (recognitionRestartTimer) {
-      clearTimeout(recognitionRestartTimer)
-      recognitionRestartTimer = null
+  function setMicState(state) {
+    if (!micBtn) return
+    micBtn.classList.remove("is-listening", "is-processing")
+    if (state) micBtn.classList.add(state)
+    micBtn.setAttribute("aria-pressed", state === "is-listening" ? "true" : "false")
+  }
+
+  function releaseMic() {
+    if (micStream) {
+      var tracks = micStream.getTracks()
+      for (var i = 0; i < tracks.length; i++) tracks[i].stop()
+      micStream = null
     }
-    if (recognition) {
+    recorder = null
+    recordedChunks = []
+  }
+
+  function stopRecording() {
+    recording = false
+    if (recorder && recorder.state !== "inactive") {
       try {
-        recognition.abort()
-      } catch (e) {}
-    }
-    if (micBtn) {
-      micBtn.classList.remove("is-listening")
-      micBtn.setAttribute("aria-pressed", "false")
+        recorder.stop() // fires "stop" → finalizeRecording
+      } catch (e) {
+        releaseMic()
+        setMicState(null)
+      }
+    } else {
+      releaseMic()
+      setMicState(null)
     }
   }
 
-  // Runs the dictated text through Gemini to fix recognition slips and punctuation.
-  // Skipped silently if the user restarted the mic while it runs.
-  function tidyDictation() {
-    var sent = inputEl.value
-    if (!sent.trim() || tidyInFlight) return
-    tidyInFlight = true
-    app.api("/api/transcript/fix", { method: "POST", body: { text: sent } }).then(function (data) {
-      tidyInFlight = false
-      if (!listening && data && typeof data.text === "string" && data.text.trim()) {
-        inputEl.value = data.text
-        autoGrow()
-      }
-    }).catch(function () {
-      tidyInFlight = false
+  function finalizeRecording() {
+    var mimeType = recorder ? recorder.mimeType : ""
+    releaseMic()
+
+    if (!recordedChunks.length) recordedChunks = []
+    var blob
+    try {
+      blob = new Blob(recordedChunks, { type: mimeType || undefined })
+    } catch (e) {
+      blob = new Blob(recordedChunks)
+    }
+    recordedChunks = []
+
+    if (!blob || blob.size < 2000) {
+      showTransientError("مفيش صوت مسجل. دوس المايك واتكلم وبعدين دوسه تاني.")
+      return
+    }
+
+    busyProcessing = true
+    setMicState("is-processing")
+
+    var reader = new FileReader()
+    reader.addEventListener("load", function () {
+      var result = String(reader.result || "")
+      var comma = result.indexOf(",")
+      app.api("/api/transcribe", {
+        method: "POST",
+        body: {
+          mime: mimeType || blob.type || "audio/webm",
+          data: comma === -1 ? result : result.slice(comma + 1)
+        }
+      }).then(function (data) {
+        busyProcessing = false
+        setMicState(null)
+        var text = data && typeof data.text === "string" ? data.text.trim() : ""
+        if (text) {
+          var existing = inputEl.value.replace(/\s*$/, "")
+          inputEl.value = (existing ? existing + " " : "") + text
+          autoGrow()
+        } else {
+          showTransientError("مسمعتش الكلام كويس. جرب تاني واقرب من المايك.")
+        }
+      }).catch(function (err) {
+        busyProcessing = false
+        setMicState(null)
+        showTransientError((err && err.error) || "حصلت مشكلة في تحويل الصوت. جرب تاني.")
+      })
     })
+    reader.addEventListener("error", function () {
+      busyProcessing = false
+      setMicState(null)
+      showTransientError("مقدرتش أقرا التسجيل. جرب تاني.")
+    })
+    reader.readAsDataURL(blob)
   }
 
   if (micBtn) {
-    var SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition
-    if (!SpeechRecognitionCtor) {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
       micBtn.hidden = true
     } else {
       micBtn.hidden = false
-      recognition = new SpeechRecognitionCtor()
-      recognition.lang = "ar-EG"
-      recognition.continuous = true
-      recognition.interimResults = true
-      recognition.maxAlternatives = 1
-
-      recognition.onresult = function (event) {
-        var interim = ""
-        for (var i = event.resultIndex; i < event.results.length; i++) {
-          var phrase = event.results[i][0].transcript
-          if (event.results[i].isFinal) {
-            dictationFinal += phrase.trim() + " "
-          } else {
-            interim += phrase
-          }
-        }
-        inputEl.value = (dictationBase + dictationFinal + interim).replace(/\s+$/, " ")
-        autoGrow()
-      }
-
-      recognition.onerror = function (event) {
-        if (event.error === "not-allowed" || event.error === "service-not-allowed") {
-          showTransientError("صلاحية المايك مش مفعلة. اسمح ليها من المتصفح وجرب تاني.")
-        } else if (event.error === "network") {
-          showTransientError("صوت مش واصل. اتأكد من النت وجرب تاني.")
-        }
-        // "no-speech" and "aborted" are normal — just fall through
-        stopDictation()
-      }
-
-      recognition.onend = function () {
-        // Keep the session alive through short pauses (restarts after silence).
-        if (!listening) return
-        recognitionRestartTimer = setTimeout(function () {
-          if (!listening) return
-          try {
-            recognition.start()
-          } catch (e) {
-            stopDictation()
-          }
-        }, 400)
-      }
-
-      recognition.onstart = function () {
-        if (recognitionRestartTimer) {
-          clearTimeout(recognitionRestartTimer)
-          recognitionRestartTimer = null
-        }
-      }
 
       micBtn.addEventListener("click", function () {
-        if (app.state.sending) return
-        if (listening) {
-          stopDictation()
-          tidyDictation()
+        if (busyProcessing || app.state.sending) return
+        if (recording) {
+          stopRecording()
           return
         }
-        dictationBase = inputEl.value ? inputEl.value.replace(/\s*$/, "") + " " : ""
-        dictationFinal = ""
-        listening = true
-        micBtn.classList.add("is-listening")
-        micBtn.setAttribute("aria-pressed", "true")
-        try {
-          recognition.start()
-        } catch (e) {
-          stopDictation()
-        }
+
+        recording = true
+        setMicState("is-listening")
+
+        navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+          if (!recording) {
+            // Stopped before permission was granted
+            var tracks = stream.getTracks()
+            for (var i = 0; i < tracks.length; i++) tracks[i].stop()
+            setMicState(null)
+            return
+          }
+          micStream = stream
+
+          var mimeType = ""
+          var candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"]
+          for (var i = 0; i < candidates.length; i++) {
+            if (MediaRecorder.isTypeSupported(candidates[i])) {
+              mimeType = candidates[i]
+              break
+            }
+          }
+
+          try {
+            recorder = mimeType ? new MediaRecorder(stream, { mimeType: mimeType }) : new MediaRecorder(stream)
+          } catch (e) {
+            recording = false
+            releaseMic()
+            setMicState(null)
+            showTransientError("التسجيل مش شغال على المتصفح ده. جرب كروم أو سفاري حديث.")
+            return
+          }
+
+          recordedChunks = []
+          recorder.addEventListener("dataavailable", function (event) {
+            if (event.data && event.data.size) recordedChunks.push(event.data)
+          })
+          recorder.addEventListener("stop", function () {
+            finalizeRecording()
+          })
+          recorder.start(1000)
+        }).catch(function (err) {
+          recording = false
+          setMicState(null)
+          if (err && (err.name === "NotAllowedError" || err.name === "SecurityError")) {
+            showTransientError("صلاحية المايك مش مفعلة. اسمح ليها من المتصفح وجرب تاني.")
+          } else {
+            showTransientError("مقدرتش أوصل للمايك. جرب تاني.")
+          }
+        })
       })
     }
   }

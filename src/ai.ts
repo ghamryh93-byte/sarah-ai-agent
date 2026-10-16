@@ -397,6 +397,24 @@ export class GeminiClient {
     return full
   }
 
+  // Server-side speech-to-text via Gemini (strong Egyptian Arabic accuracy).
+  // Returns ONLY the transcription — never an answer to what was said.
+  async transcribeAudio(base64Audio: string, mime: string): Promise<string> {
+    const systemText =
+      "You are a high-accuracy speech transcription engine. Transcribe the attached audio EXACTLY as spoken, in the same language and dialect: Egyptian Arabic stays Egyptian Arabic, English stays English, mixed stays mixed. Do NOT answer, translate, summarize, rephrase or comment on the content. Drop obvious stuttering and unfinished false starts, and add light natural punctuation so the text reads cleanly. Output ONLY the transcription itself - no preamble, no labels, no quotes."
+    const contents = [
+      {
+        role: "user",
+        parts: [
+          { inline_data: { mime_type: mime, data: base64Audio } },
+          { text: "Transcribe this audio to text." }
+        ]
+      }
+    ]
+    const { text } = await this.requestGemini(systemText, contents, null)
+    return text.trim()
+  }
+
   // Cleans up raw speech-to-text output (recognition slips, missing punctuation).
   // Returns only the corrected text — never an answer to what was said.
   async tidyTranscript(raw: string): Promise<string> {

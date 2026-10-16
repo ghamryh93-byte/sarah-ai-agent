@@ -1309,6 +1309,32 @@ textarea#messageInput::placeholder {
   }
 }
 
+.btn-mic.is-processing {
+  background: var(--c-primary);
+  color: #fff;
+  opacity: 1;
+}
+
+.btn-mic.is-processing svg {
+  animation: mic-blink 1.1s ease-in-out infinite;
+}
+
+@keyframes mic-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn-mic.is-processing svg {
+    animation: none;
+  }
+}
+
 .attach-preview {
   display: flex;
   flex-wrap: wrap;

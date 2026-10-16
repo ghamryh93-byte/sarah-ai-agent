@@ -914,6 +914,46 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       // Graceful: dictation never breaks because cleanup failed
       respondJson(res, 200, { text: raw })
     }
+  } else if (req.method === "POST" && pathname === "/api/transcribe") {
+    const user = getSessionUser(req.headers.cookie)
+    if (!user) {
+      respondJson(res, 401, { error: "Not authenticated" })
+      return
+    }
+
+    const bodyResult = await readJsonBody(req, UPLOAD_BODY_MAX_BYTES)
+    if (!bodyResult.ok) {
+      respondJson(res, bodyResult.status, { error: bodyResult.error })
+      return
+    }
+
+    const audioData = typeof bodyResult.data.data === "string" ? bodyResult.data.data : ""
+    if (!audioData) {
+      respondJson(res, 400, { error: "بيانات الصوت ناقصة." })
+      return
+    }
+
+    const mime =
+      typeof bodyResult.data.mime === "string" && /^audio\//.test(bodyResult.data.mime.toLowerCase())
+        ? bodyResult.data.mime.toLowerCase()
+        : "audio/webm"
+
+    try {
+      const decoded = Buffer.from(audioData, "base64")
+      if (decoded.length === 0) {
+        respondJson(res, 400, { error: "الصوت فاضي." })
+        return
+      }
+      const gemini = new GeminiClient()
+      const text = await gemini.transcribeAudio(decoded.toString("base64"), mime)
+      respondJson(res, 200, { text })
+    } catch (err) {
+      const detail = ((err as Error).message || "").slice(0, 140)
+      console.error("Transcribe error:", err)
+      respondJson(res, 500, {
+        error: "مقدرتش أحول الصوت لنص. جرب تاني" + (detail ? ` — سبب محتمل: ${detail}` : "")
+      })
+    }
   } else if (req.method === "POST" && pathname === "/api/chat") {
     const user = getSessionUser(req.headers.cookie)
     if (!user) {
