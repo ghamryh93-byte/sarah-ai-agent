@@ -634,6 +634,11 @@
   var micStream = null
   var recordedChunks = []
   var recognition = null
+  var isMobileUA = /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent || "")
+  var isIOSUA = /iphone|ipad|ipod/i.test(navigator.userAgent || "")
+  // On mobile the browser can't run the speech engine and MediaRecorder at the
+  // same time (mic conflict → recording fails). Mobile = record → Gemini only.
+  var previewAllowed = !isMobileUA
   var voiceBaseText = ""
   var previewFinal = ""
   var previewInterim = ""
@@ -683,6 +688,7 @@
       releaseMic()
       setMicState(null)
     }
+    if (navigator.vibrate) navigator.vibrate(30)
   }
 
   function finalizeRecording() {
@@ -747,6 +753,7 @@
   // Live preview engine: shows words while you speak (Chrome/Edge/Safari).
   // Provisional only — the Gemini pass decides the final text.
   function startVoicePreview() {
+    if (!previewAllowed) return // mobile: mic stays exclusive to MediaRecorder
     var SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition
     if (!SpeechRecognitionCtor) return // fine: no live preview, final text still comes from Gemini
 
@@ -831,11 +838,15 @@
           micStream = stream
 
           var mimeType = ""
-          var candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"]
-          for (var i = 0; i < candidates.length; i++) {
-            if (MediaRecorder.isTypeSupported(candidates[i])) {
-              mimeType = candidates[i]
-              break
+          if (typeof MediaRecorder.isTypeSupported === "function") {
+            var candidates = isIOSUA
+              ? ["audio/mp4", "audio/mp3", "audio/aac"]
+              : ["audio/webm;codecs=opus", "audio/webm"]
+            for (var i = 0; i < candidates.length; i++) {
+              if (MediaRecorder.isTypeSupported(candidates[i])) {
+                mimeType = candidates[i]
+                break
+              }
             }
           }
 
@@ -856,7 +867,14 @@
           recorder.addEventListener("stop", function () {
             finalizeRecording()
           })
-          recorder.start(1000)
+          // Mobile Safari can produce a broken file when slices are reassembled —
+          // buffer everything in one recording on iOS, slices elsewhere.
+          if (isIOSUA) {
+            recorder.start()
+          } else {
+            recorder.start(1000)
+          }
+          if (navigator.vibrate) navigator.vibrate(30)
         }).catch(function (err) {
           recording = false
           releaseMic()
