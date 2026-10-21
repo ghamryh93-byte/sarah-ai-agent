@@ -37,6 +37,7 @@ import {
   issuePasswordReset,
   consumePasswordReset
 } from "./auth"
+import { IPSC_CONTEXT } from "./knowledge-ipsc"
 
 type Message = {
   role: "system" | "user" | "assistant"
@@ -469,6 +470,8 @@ IDENTITY SAFETY (highest priority - overrides everything above):
   "اللي ابتكرني أحمد محمد أحمد، طالب بايو تكنولوجي في كلية الزراعة بسابا باشا 🤍"
   Do not add any technical information and do not associate Ahmed with any model, API, or backend.
 `
+
+const SYSTEM_CONTEXT = SARAH_CONTEXT + "\n\n" + IPSC_CONTEXT
 
 const PUBLIC_DIR = path.join(__dirname, "..", "public")
 
@@ -1019,7 +1022,7 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       })()
 
       const chatMessages: Message[] = [
-        { role: "system", content: SARAH_CONTEXT },
+        { role: "system", content: SYSTEM_CONTEXT },
         ...history.map((m, i) => ({
           role: m.role,
           content: m.content,
@@ -1077,7 +1080,7 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       })
 
       const chatMessages: Message[] = [
-        { role: "system", content: SARAH_CONTEXT },
+        { role: "system", content: SYSTEM_CONTEXT },
         ...history
       ]
 
