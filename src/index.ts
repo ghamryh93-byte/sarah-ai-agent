@@ -36,6 +36,8 @@ import {
 } from "./auth"
 import { IPSC_CONTEXT } from "./knowledge-ipsc"
 import { RATE_LIMITS, hit, reset as resetRateLimit, clientIp, tooManyRequests } from "./rateLimit"
+import { webSearch } from "./search"
+import { findUserById } from "./storage"
 
 type Message = {
   role: "system" | "user" | "assistant"
@@ -887,6 +889,61 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
     } else {
       respondJson(res, 400, { error: "The reset code is invalid or has expired." })
     }
+  } else if (req.method === "GET" && pathname === "/api/admin/speed-test") {
+    // Admin-only: measures where reply time goes (AI at each thinking level,
+    // web search, database) on the live deployment.
+    const user = await getSessionUser(req.headers.cookie)
+    if (!user || !isAdminEmail(user.email)) {
+      respondJson(res, 403, { error: "Forbidden: Admins only." })
+      return
+    }
+    const wait = hit(RATE_LIMITS.voice, "speedtest:" + user.id)
+    if (wait) {
+      tooManyRequests(res, wait)
+      return
+    }
+
+    const timeIt = async <T>(fn: () => Promise<T>) => {
+      const t = Date.now()
+      try {
+        const value = await fn()
+        return { ok: true as const, ms: Date.now() - t, value }
+      } catch (err) {
+        return { ok: false as const, ms: Date.now() - t, error: ((err as Error).message || "").slice(0, 200) }
+      }
+    }
+
+    const ai: unknown[] = []
+    for (const level of ["minimal", "low"]) {
+      const client = new GeminiClient()
+      client.setThinkingLevel(level)
+      const r = await timeIt(() =>
+        client.getReply([
+          { role: "system", content: SARAH_CONTEXT },
+          { role: "user", content: "إزيك يا سارة؟ عرفيني بنفسك في سطرين." }
+        ])
+      )
+      ai.push({
+        requestedLevel: level,
+        totalMs: r.ms,
+        ok: r.ok,
+        ...(r.ok ? { replyPreview: r.value.slice(0, 80) } : { error: r.error }),
+        lastRound: client.lastTiming
+      })
+    }
+
+    const search = await timeIt(() => webSearch("Alexandria University"))
+    const db = await timeIt(() => findUserById(user.id))
+
+    respondJson(res, 200, {
+      provider: (process.env.LLM_PROVIDER || "gemini").toLowerCase(),
+      defaultThinkingLevel: (process.env.GEMINI_THINKING_LEVEL || "minimal").toLowerCase(),
+      ai,
+      webSearch: search.ok
+        ? { ms: search.ms, ok: true, gotResults: !/No useful search results/.test(search.value), preview: search.value.slice(0, 120) }
+        : { ms: search.ms, ok: false, error: search.error },
+      database: { ms: db.ms, ok: db.ok }
+    })
   } else if (req.method === "GET" && pathname === "/api/admin/data") {
     const user = await getSessionUser(req.headers.cookie)
     if (!user || !isAdminEmail(user.email)) {

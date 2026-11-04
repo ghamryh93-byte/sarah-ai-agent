@@ -278,9 +278,43 @@ type GeminiUsageMetadata = {
   thoughtsTokenCount?: number
 }
 
+// How much the model "thinks" before answering. Flash/Flash-Lite models
+// support minimal | low | medium | high; minimal is by far the fastest.
+// Override with the GEMINI_THINKING_LEVEL environment variable.
+const DEFAULT_THINKING_LEVEL = (process.env.GEMINI_THINKING_LEVEL || "minimal").toLowerCase()
+// If the configured model rejects a level, we fall back to "low" for the rest
+// of this server instance's life instead of failing every request.
+let thinkingLevelRejected = false
+
+export type GeminiTiming = {
+  model: string
+  thinkingLevel: string
+  firstTokenMs: number | null
+  totalMs: number
+  thoughtsTokens: number | null
+  promptTokens: number | null
+  outputTokens: number | null
+}
+
 export class GeminiClient {
   private apiKey: string
   private model: string
+  private thinkingOverride: string | null = null
+  // Timing of the most recent request (read by the admin speed test).
+  public lastTiming: GeminiTiming | null = null
+
+  get modelName(): string {
+    return this.model
+  }
+
+  setThinkingLevel(level: string): void {
+    this.thinkingOverride = level
+  }
+
+  private currentThinkingLevel(): string {
+    if (this.thinkingOverride) return this.thinkingOverride
+    return thinkingLevelRejected ? "low" : DEFAULT_THINKING_LEVEL
+  }
 
   constructor() {
     this.apiKey = process.env.GEMINI_API_KEY as string
@@ -436,14 +470,17 @@ export class GeminiClient {
   ): Promise<{ text: string; functionCalls: { name: string; args: Record<string, unknown> }[]; finishReason: string | null }> {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:streamGenerateContent?alt=sse`
 
+    const startedAt = Date.now()
+    let thinkingLevel = this.currentThinkingLevel()
+    const generationConfig: Record<string, unknown> = {
+      temperature: 0.7,
+      maxOutputTokens: 8192,
+      thinkingConfig: { thinkingLevel }
+    }
     const requestBody: Record<string, unknown> = {
       systemInstruction: { parts: [{ text: systemText }] },
       contents,
-      generationConfig: {
-        temperature: 0.7,
-        maxOutputTokens: 8192,
-        thinkingConfig: { thinkingLevel: "low" }
-      }
+      generationConfig
     }
 
     if (tools !== undefined && tools !== null) {
@@ -478,7 +515,22 @@ export class GeminiClient {
       throw lastError || new Error("Gemini API request failed")
     }
 
-    let response = await doFetch()
+    let response: Response
+    try {
+      response = await doFetch()
+    } catch (err) {
+      // The model may not accept this thinking level: retry once with "low".
+      const msg = (err as Error).message || ""
+      if (thinkingLevel !== "low" && /\b400\b/.test(msg) && /think/i.test(msg)) {
+        console.log(`Gemini rejected thinkingLevel=${thinkingLevel}, falling back to "low"`)
+        if (!this.thinkingOverride) thinkingLevelRejected = true
+        thinkingLevel = "low"
+        generationConfig.thinkingConfig = { thinkingLevel }
+        response = await doFetch()
+      } else {
+        throw err
+      }
+    }
 
     if (!response.ok) {
       const errorText = await response.text()
@@ -501,6 +553,7 @@ export class GeminiClient {
     let finishReason: string | null = null
     const decoder = new TextDecoder()
     let buffer = ""
+    let firstTokenAt: number | null = null
 
     const processLine = (line: string) => {
       const trimmed = line.trim()
@@ -517,6 +570,7 @@ export class GeminiClient {
           const parts = (candidates[0].content && candidates[0].content.parts) || []
           for (const p of parts) {
             if (p.text && !p.thought) {
+              if (firstTokenAt === null) firstTokenAt = Date.now()
               full += p.text
               if (onDelta) {
                 try {
@@ -561,6 +615,18 @@ export class GeminiClient {
 
     console.log("FINISH REASON:", finishReason)
     const finalUsage = usage as GeminiUsageMetadata | null
+    this.lastTiming = {
+      model: this.model,
+      thinkingLevel,
+      firstTokenMs: firstTokenAt === null ? null : firstTokenAt - startedAt,
+      totalMs: Date.now() - startedAt,
+      thoughtsTokens: finalUsage?.thoughtsTokenCount ?? null,
+      promptTokens: finalUsage?.promptTokenCount ?? null,
+      outputTokens: finalUsage?.candidatesTokenCount ?? null
+    }
+    console.log(
+      `TIMING: model=${this.model} thinking=${thinkingLevel} first_token_ms=${this.lastTiming.firstTokenMs ?? "-"} total_ms=${this.lastTiming.totalMs}`
+    )
     if (finalUsage) {
       console.log(
         `TOKENS: prompt=${finalUsage.promptTokenCount ?? "?"} output=${finalUsage.candidatesTokenCount ?? "?"} thoughts=${finalUsage.thoughtsTokenCount ?? "?"} total=${finalUsage.totalTokenCount ?? "?"}`
