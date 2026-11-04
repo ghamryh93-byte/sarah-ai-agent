@@ -10,8 +10,10 @@ import {
   updateUser,
   normalizeEmail,
   generateId,
-  persistSessions,
-  revokeAllSessionsForUser
+  flushSession,
+  revokeSession,
+  revokeAllSessionsForUser,
+  DuplicateEmailError
 } from "./storage"
 
 const SCRYPT_N = 16384
@@ -105,38 +107,43 @@ function parseSessionCookie(cookieHeader: string | undefined): string | null {
   return null
 }
 
-export function getSessionUser(cookieHeader: string | undefined): UserRecord | null {
+export async function getSessionUser(cookieHeader: string | undefined): Promise<UserRecord | null> {
   const token = parseSessionCookie(cookieHeader)
   if (!token) return null
 
-  const session = findSessionById(hashSessionToken(token))
+  let session: SessionRecord | undefined
+  try {
+    session = await findSessionById(hashSessionToken(token))
+  } catch (err) {
+    console.error("Auth: session lookup failed:", (err as Error).message)
+    return null
+  }
   if (!session || session.revokedAt !== null || session.expiresAt <= Date.now()) return null
 
-  const user = findUserById(session.userId)
+  const user = await findUserById(session.userId)
   if (!user) return null
 
+  // Sliding expiry: extend the session, but only write it back at most once
+  // an hour per session to avoid a database write on every request.
   const now = Date.now()
-  session.lastSeenAt = now
-  session.expiresAt = now + SESSION_LIFETIME_MS
-
-  const lastPersist = lastRenewPersistAt.get(session.id) || 0
+  const lastPersist = Math.max(lastRenewPersistAt.get(session.id) || 0, session.lastSeenAt)
   if (now - lastPersist >= SESSION_RENEW_PERSIST_INTERVAL_MS) {
+    session.lastSeenAt = now
+    session.expiresAt = now + SESSION_LIFETIME_MS
     lastRenewPersistAt.set(session.id, now)
-    persistSessions()
+    await flushSession(session)
   }
 
   return user
 }
 
-export function revokeSessionByCookie(cookieHeader: string | undefined): boolean {
+export async function revokeSessionByCookie(cookieHeader: string | undefined): Promise<boolean> {
   const token = parseSessionCookie(cookieHeader)
   if (!token) return false
 
-  const session = findSessionById(hashSessionToken(token))
-  if (!session) return false
-
-  session.revokedAt = Date.now()
-  persistSessions()
+  const sessionId = hashSessionToken(token)
+  lastRenewPersistAt.delete(sessionId)
+  await revokeSession(sessionId)
   return true
 }
 
@@ -207,7 +214,7 @@ export type RegisterResult =
 export async function registerUser(input: RegistrationInput): Promise<RegisterResult> {
   const email = normalizeEmail(input.email)
 
-  if (findUserByEmail(email)) {
+  if (await findUserByEmail(email)) {
     return { ok: false, error: "DUPLICATE_EMAIL" }
   }
 
@@ -219,12 +226,17 @@ export async function registerUser(input: RegistrationInput): Promise<RegisterRe
     createdAt: new Date().toISOString()
   }
 
-  await addUser(user)
+  try {
+    await addUser(user)
+  } catch (err) {
+    if (err instanceof DuplicateEmailError) return { ok: false, error: "DUPLICATE_EMAIL" }
+    throw err
+  }
   return { ok: true, user }
 }
 
-export function authenticate(email: string, password: string): UserRecord | null {
-  const user = findUserByEmail(email)
+export async function authenticate(email: string, password: string): Promise<UserRecord | null> {
+  const user = await findUserByEmail(email)
 
   if (!user) {
     verifyPassword(password, DUMMY_HASH)
@@ -246,7 +258,7 @@ function safeEqualHex(a: string, b: string): boolean {
 }
 
 export async function issuePasswordReset(email: string): Promise<{ code: string; user: UserRecord } | null> {
-  const user = findUserByEmail(email)
+  const user = await findUserByEmail(email)
   if (!user) return null
 
   const code = String(crypto.randomInt(100000, 1000000))
@@ -261,7 +273,7 @@ export async function issuePasswordReset(email: string): Promise<{ code: string;
 export type ConsumeResetResult = "OK" | "INVALID" | "EXPIRED" | "TOO_MANY_ATTEMPTS"
 
 export async function consumePasswordReset(email: string, code: string, newPassword: string): Promise<ConsumeResetResult> {
-  const user = findUserByEmail(email)
+  const user = await findUserByEmail(email)
   if (!user) return "INVALID"
   if (!user.resetCodeHash || !user.resetCodeExpiresAt) return "INVALID"
   if (Date.now() > user.resetCodeExpiresAt) return "EXPIRED"

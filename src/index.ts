@@ -6,7 +6,6 @@ import { NVIDIAClient, GeminiClient } from "./ai"
 import { isMailerConfigured, sendInterestEmail, sendPasswordResetCode, sendAdminNotification, InterestApplication } from "./mailer"
 import {
   ConversationRecord,
-  findUserByEmail,
   generateId,
   listConversationsForUser,
   readConversation,
@@ -15,10 +14,8 @@ import {
   getAllUsers,
   listAllConversations,
   isAdminEmail,
-  syncStorageWithCloud,
-  persistUsersAsync,
-  persistSessionsAsync,
   getStorageEngineInfo,
+  saveApplication,
   saveMessageAttachment,
   AttachmentValidationError,
   MessageAttachment
@@ -38,6 +35,7 @@ import {
   consumePasswordReset
 } from "./auth"
 import { IPSC_CONTEXT } from "./knowledge-ipsc"
+import { RATE_LIMITS, hit, reset as resetRateLimit, clientIp, tooManyRequests } from "./rateLimit"
 
 type Message = {
   role: "system" | "user" | "assistant"
@@ -471,7 +469,16 @@ IDENTITY SAFETY (highest priority - overrides everything above):
   Do not add any technical information and do not associate Ahmed with any model, API, or backend.
 `
 
-const SYSTEM_CONTEXT = SARAH_CONTEXT + "\n\n" + IPSC_CONTEXT
+// The IPSC conference guide is ~42k characters. Sending it with every message
+// made every reply slower, so it is only included when the conversation is
+// actually about the conference (same keywords the guide's own scoping rules list).
+const IPSC_KEYWORDS =
+  /ipsc|pharmaceutical\s+sciences?\s+conference|pharma(?:ceutical)?\s+conference|assiut|أسيوط|اسيوط|مؤتمر\s+(?:ال)?صيدل|علوم\s+الصيدلة|رسوم\s+المؤتمر/i
+
+function systemContextFor(history: { content: string }[]): string {
+  const mentionsIpsc = history.some(m => IPSC_KEYWORDS.test(m.content || ""))
+  return mentionsIpsc ? SARAH_CONTEXT + "\n\n" + IPSC_CONTEXT : SARAH_CONTEXT
+}
 
 const PUBLIC_DIR = path.join(__dirname, "..", "public")
 
@@ -545,14 +552,65 @@ const DEFAULT_CONVERSATION_TITLE = "محادثة جديدة"
 const CHAT_HISTORY_LIMIT = 40
 const MAX_MESSAGE_LENGTH = 8000
 
-async function processSarahReply(chatMessages: Message[]): Promise<string> {
+type ReplyContext = { userId: string; conversationId: string | null }
+
+// High-precision identity-leak guard.
+// Only blocks brand names and self-referential leak phrasing.
+// Generic words (model, api, llm, provider, backend, developer) are allowed
+// when they are part of a legitimate answer to the user's actual question.
+const IDENTITY_LEAK_PATTERNS = [
+  /nemotron/i,
+  /\bnvidia\b/i,
+  /نيموتر|نيموترون|نفيديا|إنفيديا/i,
+  /\b(?:i\s+am|i'?m)\s+(?:an?\s+)?(?:ai\s+|large\s+language\s+|language\s+)*(?:model|llm)\b/i,
+  /\bmy\s+(?:underlying\s+)?(?:model|provider|api|backend|system\s+prompt|system\s+instructions|developer\s+instructions|technical\s+implementation)\b/i,
+  /\bi\s+was\s+(?:trained|developed|built|created|made|programmed)\b/i,
+  /\b(?:trained|developed|built|created|made|powered|hosted|run)\s+(?:by|on|using|with)\s+(?:nvidia|nemotron|z-?ai|glm|gemini|openai|anthropic)\b/i,
+  /\bdeveloper\s+instructions\b/i,
+  /(?:بستخدم|شغالة|مبنية|متعملة|متبرمجة|متدربة)\s+(?:على|بواسطة|ب|من)\s*(?:نموذج|موديل|GLM|Gemini|منصة)/i,
+  /أنا\s+(?:موديل|نموذج)\s*(?:لغوي|ذكاء|AI)?/i
+]
+
+// Forwards streamed reply text to the browser while holding back anything
+// the user must never see: the hidden [[APPLICATION]] data block, and
+// anything after an identity leak (the final reply replaces it anyway).
+function createVisibleStreamer(send: (text: string) => void): (delta: string) => void {
+  let raw = ""
+  let sent = 0
+  let stopped = false
+  return (delta: string) => {
+    if (stopped || !delta) return
+    raw += delta
+    let visibleEnd = raw.length
+    const blockAt = raw.indexOf("[[")
+    if (blockAt !== -1) visibleEnd = blockAt
+    else if (raw.endsWith("[")) visibleEnd = raw.length - 1
+    if (visibleEnd <= sent) return
+    const recent = raw.slice(Math.max(0, sent - 200), visibleEnd)
+    if (IDENTITY_LEAK_PATTERNS.some(p => p.test(recent))) {
+      stopped = true
+      return
+    }
+    send(raw.slice(sent, visibleEnd))
+    sent = visibleEnd
+  }
+}
+
+async function processSarahReply(
+  chatMessages: Message[],
+  context: ReplyContext,
+  onVisibleDelta?: (text: string) => void
+): Promise<string> {
   const llmProvider = (process.env.LLM_PROVIDER || "gemini").toLowerCase()
 
   let reply: string
   try {
     if (llmProvider === "gemini") {
       const geminiClient = new GeminiClient()
-      reply = await geminiClient.getReply(chatMessages)
+      reply = await geminiClient.getReply(
+        chatMessages,
+        onVisibleDelta ? createVisibleStreamer(onVisibleDelta) : undefined
+      )
     } else {
       const nvidiaClient = new NVIDIAClient()
       reply = await nvidiaClient.getReply(chatMessages)
@@ -567,24 +625,7 @@ async function processSarahReply(chatMessages: Message[]): Promise<string> {
     }
   }
 
-  // High-precision identity-leak guard.
-  // Only blocks brand names and self-referential leak phrasing.
-  // Generic words (model, api, llm, provider, backend, developer) are allowed
-  // when they are part of a legitimate answer to the user's actual question.
-  const identityLeakPatterns = [
-    /nemotron/i,
-    /\bnvidia\b/i,
-    /نيموتر|نيموترون|نفيديا|إنفيديا/i,
-    /\b(?:i\s+am|i'?m)\s+(?:an?\s+)?(?:ai\s+|large\s+language\s+|language\s+)*(?:model|llm)\b/i,
-    /\bmy\s+(?:underlying\s+)?(?:model|provider|api|backend|system\s+prompt|system\s+instructions|developer\s+instructions|technical\s+implementation)\b/i,
-    /\bi\s+was\s+(?:trained|developed|built|created|made|programmed)\b/i,
-    /\b(?:trained|developed|built|created|made|powered|hosted|run)\s+(?:by|on|using|with)\s+(?:nvidia|nemotron|z-?ai|glm|gemini|openai|anthropic)\b/i,
-    /\bdeveloper\s+instructions\b/i,
-    /(?:بستخدم|شغالة|مبنية|متعملة|متبرمجة|متدربة)\s+(?:على|بواسطة|ب|من)\s*(?:نموذج|موديل|GLM|Gemini|منصة)/i,
-    /أنا\s+(?:موديل|نموذج)\s*(?:لغوي|ذكاء|AI)?/i
-  ]
-
-  const matchedLeakPatterns = identityLeakPatterns
+  const matchedLeakPatterns = IDENTITY_LEAK_PATTERNS
     .filter(pattern => pattern.test(reply))
     .map(pattern => pattern.source)
 
@@ -604,17 +645,31 @@ async function processSarahReply(chatMessages: Message[]): Promise<string> {
 
     try {
       const application = JSON.parse(applicationMatch[1]) as InterestApplication
+      const field = (v: unknown, max = 500) => (typeof v === "string" ? v.trim().slice(0, max) : "")
 
-      const logLine = JSON.stringify({
-        receivedAt: new Date().toISOString(),
-        application
-      })
-      const appsLogFile = process.env.VERCEL ? path.join("/tmp", "applications.log") : "applications.log"
       try {
-        fs.appendFileSync(appsLogFile, logLine + "\n", "utf8")
-        console.log("Application collected and stored")
-      } catch (logErr) {
-        console.warn("Could not write to applications.log:", logErr)
+        await saveApplication({
+          id: generateId("app"),
+          userId: context.userId,
+          conversationId: context.conversationId,
+          fullName: field(application.fullName, 120),
+          phone: field(application.phone, 40),
+          email: field(application.email, 254),
+          university: field(application.university, 160),
+          faculty: field(application.faculty, 160),
+          academicYear: field(application.academicYear, 60),
+          request: field(application.request, 1000),
+          role: field(application.role, 160),
+          skills: field(application.skills, 2000),
+          notes: field(application.notes, 2000),
+          status: "new",
+          createdAt: new Date().toISOString()
+        })
+        console.log("Application collected and saved to database")
+      } catch (saveErr) {
+        // Last-resort copy in the server logs so the application is never lost.
+        console.error("Application DB save failed:", (saveErr as Error).message)
+        console.error("APPLICATION_BACKUP " + JSON.stringify({ receivedAt: new Date().toISOString(), userId: context.userId, application }))
       }
 
       if (isMailerConfigured()) {
@@ -636,13 +691,17 @@ async function processSarahReply(chatMessages: Message[]): Promise<string> {
 }
 
 export async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-  await syncStorageWithCloud()
   const host = req.headers.host || "localhost"
   const rawUrl = (req.headers["x-forwarded-uri"] as string) || req.url || "/"
   const parsedUrl = new URL(rawUrl, `http://${host}`)
   const pathname = parsedUrl.pathname
 
   if (req.method === "POST" && pathname === "/api/auth/register") {
+    const ipWait = hit(RATE_LIMITS.register, "ip:" + clientIp(req))
+    if (ipWait) {
+      tooManyRequests(res, ipWait, "Too many sign-up attempts. Please try again later.")
+      return
+    }
     const bodyResult = await readJsonBody(req)
     if (!bodyResult.ok) {
       respondJson(res, bodyResult.status, { error: bodyResult.error })
@@ -681,8 +740,6 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
 
     const session = await createSession(result.user.id)
     console.log(`Auth: user registered (${result.user.id})`)
-    await persistUsersAsync()
-    await persistSessionsAsync()
 
     sendAdminNotification("New User Registered 🎉", {
       "Full Name": result.user.fullName,
@@ -695,6 +752,11 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       "Set-Cookie": sessionCookieHeader(session.token)
     })
   } else if (req.method === "POST" && pathname === "/api/auth/login") {
+    const ipWait = hit(RATE_LIMITS.login, "ip:" + clientIp(req))
+    if (ipWait) {
+      tooManyRequests(res, ipWait, "Too many login attempts. Please try again later.")
+      return
+    }
     const bodyResult = await readJsonBody(req)
     if (!bodyResult.ok) {
       respondJson(res, bodyResult.status, { error: bodyResult.error })
@@ -707,16 +769,23 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       return
     }
 
-    const user = authenticate(data.email, data.password)
+    const emailKey = "email:" + data.email.trim().toLowerCase()
+    const emailWait = hit(RATE_LIMITS.login, emailKey)
+    if (emailWait) {
+      tooManyRequests(res, emailWait, "Too many login attempts for this account. Please try again later.")
+      return
+    }
+
+    const user = await authenticate(data.email, data.password)
     if (!user) {
       console.log("Auth: login failed")
       respondJson(res, 401, { error: "The email or password is incorrect." })
       return
     }
+    resetRateLimit(RATE_LIMITS.login, emailKey)
 
     const session = await createSession(user.id)
     console.log(`Auth: login ok (${user.id})`)
-    await persistSessionsAsync()
 
     sendAdminNotification("User Logged In 🔑", {
       "Full Name": user.fullName,
@@ -728,19 +797,29 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       "Set-Cookie": sessionCookieHeader(session.token)
     })
   } else if (req.method === "POST" && pathname === "/api/auth/logout") {
-    revokeSessionByCookie(req.headers.cookie)
-    await persistSessionsAsync()
+    try {
+      await revokeSessionByCookie(req.headers.cookie)
+    } catch (err) {
+      console.error("Auth: logout revoke failed:", (err as Error).message)
+      respondJson(res, 500, { error: "Logout failed. Please try again." })
+      return
+    }
     respondJson(res, 200, { ok: true }, {
       "Set-Cookie": clearSessionCookieHeader()
     })
   } else if (req.method === "GET" && pathname === "/api/auth/me") {
-    const user = getSessionUser(req.headers.cookie)
+    const user = await getSessionUser(req.headers.cookie)
     if (!user) {
       respondJson(res, 401, { error: "Not authenticated" })
       return
     }
     respondJson(res, 200, { user: { ...toPublicUser(user), isAdmin: isAdminEmail(user.email) } })
   } else if (req.method === "POST" && pathname === "/api/auth/forgot-password") {
+    const ipWait = hit(RATE_LIMITS.forgotPassword, "ip:" + clientIp(req))
+    if (ipWait) {
+      tooManyRequests(res, ipWait, "Too many reset requests. Please try again later.")
+      return
+    }
     const bodyResult = await readJsonBody(req)
     if (!bodyResult.ok) {
       respondJson(res, bodyResult.status, { error: bodyResult.error })
@@ -773,6 +852,11 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       message: "If the email is registered, a reset code has been sent to it."
     })
   } else if (req.method === "POST" && pathname === "/api/auth/reset-password") {
+    const ipWait = hit(RATE_LIMITS.resetPassword, "ip:" + clientIp(req))
+    if (ipWait) {
+      tooManyRequests(res, ipWait, "Too many attempts. Please try again later.")
+      return
+    }
     const bodyResult = await readJsonBody(req)
     if (!bodyResult.ok) {
       respondJson(res, bodyResult.status, { error: bodyResult.error })
@@ -804,12 +888,12 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       respondJson(res, 400, { error: "The reset code is invalid or has expired." })
     }
   } else if (req.method === "GET" && pathname === "/api/admin/data") {
-    const user = getSessionUser(req.headers.cookie)
+    const user = await getSessionUser(req.headers.cookie)
     if (!user || !isAdminEmail(user.email)) {
       respondJson(res, 403, { error: "Forbidden: Admins only." })
       return
     }
-    const allUsers = getAllUsers()
+    const allUsers = await getAllUsers()
     const allConversations = await listAllConversations()
     const userMap: Record<string, string> = {}
     for (const u of allUsers) userMap[u.id] = u.fullName
@@ -828,7 +912,7 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       }))
     })
   } else if (req.method === "POST" && pathname === "/api/conversations") {
-    const user = getSessionUser(req.headers.cookie)
+    const user = await getSessionUser(req.headers.cookie)
     if (!user) {
       respondJson(res, 401, { error: "Not authenticated" })
       return
@@ -846,10 +930,17 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
     await writeConversation(conversation)
     respondJson(res, 201, { conversation })
   } else if (req.method === "POST" && pathname === "/api/upload") {
-    const user = getSessionUser(req.headers.cookie)
+    const user = await getSessionUser(req.headers.cookie)
     if (!user) {
       respondJson(res, 401, { error: "Not authenticated" })
       return
+    }
+    {
+      const wait = hit(RATE_LIMITS.upload, "user:" + user.id)
+      if (wait) {
+        tooManyRequests(res, wait)
+        return
+      }
     }
 
     const bodyResult = await readJsonBody(req, UPLOAD_BODY_MAX_BYTES)
@@ -890,10 +981,17 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       })
     }
   } else if (req.method === "POST" && pathname === "/api/transcript/fix") {
-    const user = getSessionUser(req.headers.cookie)
+    const user = await getSessionUser(req.headers.cookie)
     if (!user) {
       respondJson(res, 401, { error: "Not authenticated" })
       return
+    }
+    {
+      const wait = hit(RATE_LIMITS.voice, "user:" + user.id)
+      if (wait) {
+        tooManyRequests(res, wait)
+        return
+      }
     }
 
     const bodyResult = await readJsonBody(req)
@@ -918,10 +1016,17 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       respondJson(res, 200, { text: raw })
     }
   } else if (req.method === "POST" && pathname === "/api/transcribe") {
-    const user = getSessionUser(req.headers.cookie)
+    const user = await getSessionUser(req.headers.cookie)
     if (!user) {
       respondJson(res, 401, { error: "Not authenticated" })
       return
+    }
+    {
+      const wait = hit(RATE_LIMITS.voice, "user:" + user.id)
+      if (wait) {
+        tooManyRequests(res, wait)
+        return
+      }
     }
 
     const bodyResult = await readJsonBody(req, UPLOAD_BODY_MAX_BYTES)
@@ -958,10 +1063,24 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       })
     }
   } else if (req.method === "POST" && pathname === "/api/chat") {
-    const user = getSessionUser(req.headers.cookie)
+    const user = await getSessionUser(req.headers.cookie)
     if (!user) {
       respondJson(res, 401, { error: "Not authenticated" })
       return
+    }
+    {
+      const wait = hit(RATE_LIMITS.chatPerMinute, "user:" + user.id)
+      if (wait) {
+        tooManyRequests(res, wait)
+        return
+      }
+    }
+    {
+      const wait = hit(RATE_LIMITS.chatPerDay, "user:" + user.id)
+      if (wait) {
+        tooManyRequests(res, wait)
+        return
+      }
     }
 
     const bodyResult = await readJsonBody(req)
@@ -983,6 +1102,8 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       respondJson(res, 400, { error: "conversationId و message مطلوبين." })
       return
     }
+
+    if (typeof data.message !== "string") data.message = ""
 
     if (data.message.length > MAX_MESSAGE_LENGTH) {
       respondJson(res, 400, { error: "الرسالة أطول من اللازم." })
@@ -1022,7 +1143,7 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       })()
 
       const chatMessages: Message[] = [
-        { role: "system", content: SYSTEM_CONTEXT },
+        { role: "system", content: systemContextFor(history) },
         ...history.map((m, i) => ({
           role: m.role,
           content: m.content,
@@ -1032,7 +1153,33 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
         }))
       ]
 
-      const finalReply = await processSarahReply(chatMessages)
+      // Streaming mode: the browser asks for it with { stream: true } and
+      // receives Server-Sent Events: "delta" chunks while Sarah writes, then
+      // one "done" event with the final, cleaned-up reply.
+      const streaming = data.stream === true
+      let clientGone = false
+      const sendEvent = (payload: unknown) => {
+        if (clientGone || res.writableEnded) return
+        res.write(`data: ${JSON.stringify(payload)}\n\n`)
+      }
+      if (streaming) {
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache, no-transform",
+          "X-Accel-Buffering": "no",
+          Connection: "keep-alive"
+        })
+        res.on("close", () => {
+          clientGone = true
+        })
+        res.write(": ok\n\n")
+      }
+
+      const finalReply = await processSarahReply(
+        chatMessages,
+        { userId: user.id, conversationId: conversation.id },
+        streaming ? text => sendEvent({ type: "delta", text }) : undefined
+      )
 
       conversation.messages.push({
         role: "assistant",
@@ -1040,22 +1187,50 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
         ts: new Date().toISOString()
       })
       conversation.updatedAt = new Date().toISOString()
+      // Saved even if the user closed the page mid-reply.
       await writeConversation(conversation)
 
-      respondJson(res, 200, {
+      const result = {
         reply: finalReply,
         conversationId: conversation.id,
         title: conversation.title
-      })
+      }
+      if (streaming) {
+        sendEvent({ type: "done", ...result })
+        res.end()
+      } else {
+        respondJson(res, 200, result)
+      }
     } catch (err) {
       console.error("Error:", err)
-      respondJson(res, 500, { error: (err as Error).message })
+      if (res.headersSent) {
+        if (!res.writableEnded) {
+          res.write(`data: ${JSON.stringify({ type: "error", error: "مقدرتش أكمل الرد. جرب تاني." })}\n\n`)
+          res.end()
+        }
+      } else {
+        respondJson(res, 500, { error: "مقدرتش أرد دلوقتي. جرب تاني." })
+      }
     }
   } else if (req.method === "POST" && pathname === "/chat") {
-    const user = getSessionUser(req.headers.cookie)
+    const user = await getSessionUser(req.headers.cookie)
     if (!user) {
       respondJson(res, 401, { error: "Not authenticated" })
       return
+    }
+    {
+      const wait = hit(RATE_LIMITS.chatPerMinute, "user:" + user.id)
+      if (wait) {
+        tooManyRequests(res, wait)
+        return
+      }
+    }
+    {
+      const wait = hit(RATE_LIMITS.chatPerDay, "user:" + user.id)
+      if (wait) {
+        tooManyRequests(res, wait)
+        return
+      }
     }
 
     const bodyResult = await readJsonBody(req)
@@ -1080,11 +1255,11 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       })
 
       const chatMessages: Message[] = [
-        { role: "system", content: SYSTEM_CONTEXT },
+        { role: "system", content: systemContextFor(history) },
         ...history
       ]
 
-      const finalReply = await processSarahReply(chatMessages)
+      const finalReply = await processSarahReply(chatMessages, { userId: user.id, conversationId: null })
 
       history.push({
         role: "assistant",
@@ -1146,7 +1321,7 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       res.end(JSON.stringify({ status: "EVENT_RECEIVED" }))
     })
   } else if ((req.method === "GET" || req.method === "DELETE") && pathname.startsWith("/api/conversations")) {
-    const user = getSessionUser(req.headers.cookie)
+    const user = await getSessionUser(req.headers.cookie)
     if (!user) {
       respondJson(res, 401, { error: "Not authenticated" })
       return

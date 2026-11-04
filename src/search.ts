@@ -50,7 +50,7 @@ export async function webSearch(query: string): Promise<string> {
       "User-Agent": USER_AGENT,
       "Accept-Language": "ar,en;q=0.8"
     },
-    signal: AbortSignal.timeout(15000)
+    signal: AbortSignal.timeout(8000)
   })
 
   if (!response.ok) {

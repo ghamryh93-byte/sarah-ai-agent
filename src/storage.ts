@@ -74,16 +74,7 @@ export type ConversationRecord = {
   messages: ConversationMessage[]
 }
 
-// ---------------------------------------------------------------------------
-// In-memory caches (populated lazily; kept in sync via write-through)
-// ---------------------------------------------------------------------------
-let usersCache: UserRecord[] = []
-let sessionsCache: SessionRecord[] = []
-let usersLoaded = false
-let sessionsLoaded = false
-
 const CONVERSATION_ID_PATTERN = /^[a-zA-Z0-9_-]+$/
-const SESSION_KEEP_AFTER_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000
 
 // ---------------------------------------------------------------------------
 // Row mappers (snake_case DB <-> camelCase TS)
@@ -160,48 +151,45 @@ export function normalizeEmail(email: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// No-op stubs kept for backward-compat with callers in index.ts / auth.ts
-// ---------------------------------------------------------------------------
-export async function syncStorageWithCloud(_force = false): Promise<void> {
-  // With Supabase we read/write directly — no batch sync needed
-}
-
-export async function persistUsersAsync(): Promise<void> {
-  // Write-through on every mutation — nothing to flush
-}
-
-export async function persistSessionsAsync(): Promise<void> {
-  // Write-through on every mutation — nothing to flush
-}
-
-export function persistSessions(): void {
-  // Write-through on every mutation — nothing to flush
-}
-
-// ---------------------------------------------------------------------------
 // User operations
+//
+// Users and sessions are always read from Supabase. Vercel runs several
+// server instances at once, so an in-memory copy loaded at startup goes stale
+// as soon as another instance registers a user, creates a session, or revokes
+// one.
 // ---------------------------------------------------------------------------
-async function loadUsers(): Promise<void> {
-  if (usersLoaded) return
-  const { data, error } = await supabase().from("users").select("*")
-  if (error) throw new Error(`Supabase loadUsers error: ${error.message}`)
-  usersCache = (data ?? []).map(rowToUser)
-  usersLoaded = true
-}
-
-export function findUserByEmail(email: string): UserRecord | undefined {
+export async function findUserByEmail(email: string): Promise<UserRecord | undefined> {
   const normalized = normalizeEmail(email)
-  return usersCache.find(u => u.email === normalized)
+  if (!normalized) return undefined
+  const { data, error } = await supabase()
+    .from("users")
+    .select("*")
+    .eq("email", normalized)
+    .limit(1)
+  if (error) throw new Error(`Supabase findUserByEmail error: ${error.message}`)
+  return data && data.length ? rowToUser(data[0]) : undefined
 }
 
-export function findUserById(id: string): UserRecord | undefined {
-  return usersCache.find(u => u.id === id)
+export async function findUserById(id: string): Promise<UserRecord | undefined> {
+  if (!id) return undefined
+  const { data, error } = await supabase()
+    .from("users")
+    .select("*")
+    .eq("id", id)
+    .maybeSingle()
+  if (error) throw new Error(`Supabase findUserById error: ${error.message}`)
+  return data ? rowToUser(data) : undefined
 }
+
+export class DuplicateEmailError extends Error {}
 
 export async function addUser(user: UserRecord): Promise<void> {
   const { error } = await supabase().from("users").insert(userToRow(user))
-  if (error) throw new Error(`Supabase addUser error: ${error.message}`)
-  usersCache.push(user)
+  if (error) {
+    // 23505 = unique_violation (only raised if the email column is UNIQUE)
+    if (error.code === "23505") throw new DuplicateEmailError("Email already registered")
+    throw new Error(`Supabase addUser error: ${error.message}`)
+  }
 }
 
 export async function updateUser(user: UserRecord): Promise<void> {
@@ -209,53 +197,48 @@ export async function updateUser(user: UserRecord): Promise<void> {
     .from("users")
     .upsert(userToRow(user), { onConflict: "id" })
   if (error) throw new Error(`Supabase updateUser error: ${error.message}`)
-  const idx = usersCache.findIndex(u => u.id === user.id)
-  if (idx !== -1) usersCache[idx] = user
-  else usersCache.push(user)
 }
 
-export function getAllUsers(): Omit<UserRecord, "passwordHash" | "resetCodeHash" | "resetCodeExpiresAt" | "resetCodeAttempts">[] {
-  return usersCache.map(({ id, fullName, email, createdAt }) => ({ id, fullName, email, createdAt }))
+export async function getAllUsers(): Promise<Omit<UserRecord, "passwordHash" | "resetCodeHash" | "resetCodeExpiresAt" | "resetCodeAttempts">[]> {
+  const { data, error } = await supabase()
+    .from("users")
+    .select("id, full_name, email, created_at")
+    .order("created_at", { ascending: false })
+  if (error) throw new Error(`Supabase getAllUsers error: ${error.message}`)
+  return (data ?? []).map((row: any) => ({
+    id: row.id,
+    fullName: row.full_name,
+    email: row.email,
+    createdAt: row.created_at
+  }))
 }
 
 // ---------------------------------------------------------------------------
 // Session operations
 // ---------------------------------------------------------------------------
-async function loadSessions(): Promise<void> {
-  if (sessionsLoaded) return
-  const cutoff = Date.now() - SESSION_KEEP_AFTER_EXPIRY_MS
+export async function findSessionById(id: string): Promise<SessionRecord | undefined> {
+  if (!id) return undefined
   const { data, error } = await supabase()
     .from("sessions")
     .select("*")
-    .or(`revoked_at.is.null,expires_at.gt.${cutoff}`)
-  if (error) throw new Error(`Supabase loadSessions error: ${error.message}`)
-  sessionsCache = (data ?? []).map(rowToSession)
-  sessionsLoaded = true
-}
-
-export function findSessionById(id: string): SessionRecord | undefined {
-  return sessionsCache.find(s => s.id === id)
+    .eq("id", id)
+    .maybeSingle()
+  if (error) throw new Error(`Supabase findSessionById error: ${error.message}`)
+  return data ? rowToSession(data) : undefined
 }
 
 export async function addSession(session: SessionRecord): Promise<void> {
   const { error } = await supabase().from("sessions").insert(sessionToRow(session))
   if (error) throw new Error(`Supabase addSession error: ${error.message}`)
-  sessionsCache.push(session)
 }
 
 export async function revokeAllSessionsForUser(userId: string): Promise<void> {
-  const now = Date.now()
   const { error } = await supabase()
     .from("sessions")
-    .update({ revoked_at: now })
+    .update({ revoked_at: Date.now() })
     .eq("user_id", userId)
     .is("revoked_at", null)
   if (error) throw new Error(`Supabase revokeAllSessions error: ${error.message}`)
-  for (const s of sessionsCache) {
-    if (s.userId === userId && s.revokedAt === null) {
-      s.revokedAt = now
-    }
-  }
 }
 
 export async function flushSession(session: SessionRecord): Promise<void> {
@@ -266,12 +249,54 @@ export async function flushSession(session: SessionRecord): Promise<void> {
   if (error) console.error(`Supabase flushSession error: ${error.message}`)
 }
 
-export async function revokeSession(session: SessionRecord): Promise<void> {
+export async function revokeSession(sessionId: string): Promise<void> {
   const { error } = await supabase()
     .from("sessions")
-    .update({ revoked_at: session.revokedAt })
-    .eq("id", session.id)
-  if (error) console.error(`Supabase revokeSession error: ${error.message}`)
+    .update({ revoked_at: Date.now() })
+    .eq("id", sessionId)
+  if (error) throw new Error(`Supabase revokeSession error: ${error.message}`)
+}
+
+// ---------------------------------------------------------------------------
+// Applications (collected by Sarah in chat)
+// ---------------------------------------------------------------------------
+export type StoredApplication = {
+  id: string
+  userId: string | null
+  conversationId: string | null
+  fullName: string
+  phone: string
+  email: string
+  university: string
+  faculty: string
+  academicYear: string
+  request: string
+  role: string
+  skills: string
+  notes: string
+  status: string
+  createdAt: string
+}
+
+export async function saveApplication(app: StoredApplication): Promise<void> {
+  const { error } = await supabase().from("applications").insert({
+    id: app.id,
+    user_id: app.userId,
+    conversation_id: app.conversationId,
+    full_name: app.fullName,
+    phone: app.phone,
+    email: app.email,
+    university: app.university,
+    faculty: app.faculty,
+    academic_year: app.academicYear,
+    request: app.request,
+    role: app.role,
+    skills: app.skills,
+    notes: app.notes,
+    status: app.status,
+    created_at: app.createdAt
+  })
+  if (error) throw new Error(`Supabase saveApplication error: ${error.message}`)
 }
 
 // ---------------------------------------------------------------------------
@@ -452,14 +477,3 @@ export function isAdminEmail(email: string): boolean {
   const defaultAdmins = ["ghmaryh93@gmail.com", "ghamryh93@gmail.com", "gumballsir3@gmail.com"]
   return defaultAdmins.includes(normalized)
 }
-
-// ---------------------------------------------------------------------------
-// Boot: warm up caches on first import (non-blocking)
-// ---------------------------------------------------------------------------
-export function initStorage(): void {
-  Promise.all([loadUsers(), loadSessions()]).catch(err => {
-    console.error("Supabase warm-up error:", (err as Error).message)
-  })
-}
-
-initStorage()
