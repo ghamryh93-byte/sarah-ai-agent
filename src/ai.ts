@@ -280,11 +280,13 @@ type GeminiUsageMetadata = {
 
 // How much the model "thinks" before answering. Flash/Flash-Lite models
 // support minimal | low | medium | high; minimal is by far the fastest.
-// Override with the GEMINI_THINKING_LEVEL environment variable.
-const DEFAULT_THINKING_LEVEL = (process.env.GEMINI_THINKING_LEVEL || "minimal").toLowerCase()
-// If the configured model rejects a level, we fall back to "low" for the rest
-// of this server instance's life instead of failing every request.
-let thinkingLevelRejected = false
+// Chat picks a level per message (see chooseThinkingLevel in index.ts);
+// setting GEMINI_THINKING_LEVEL forces one level for everything.
+export const FORCED_THINKING_LEVEL = (process.env.GEMINI_THINKING_LEVEL || "").toLowerCase() || null
+const DEFAULT_THINKING_LEVEL = FORCED_THINKING_LEVEL || "minimal"
+// Levels the configured model rejected: we use "low" instead for the rest of
+// this server instance's life rather than failing every request.
+const rejectedThinkingLevels = new Set<string>()
 
 export type GeminiTiming = {
   model: string
@@ -312,8 +314,8 @@ export class GeminiClient {
   }
 
   private currentThinkingLevel(): string {
-    if (this.thinkingOverride) return this.thinkingOverride
-    return thinkingLevelRejected ? "low" : DEFAULT_THINKING_LEVEL
+    const level = this.thinkingOverride || DEFAULT_THINKING_LEVEL
+    return rejectedThinkingLevels.has(level) ? "low" : level
   }
 
   constructor() {
@@ -523,7 +525,7 @@ export class GeminiClient {
       const msg = (err as Error).message || ""
       if (thinkingLevel !== "low" && /\b400\b/.test(msg) && /think/i.test(msg)) {
         console.log(`Gemini rejected thinkingLevel=${thinkingLevel}, falling back to "low"`)
-        if (!this.thinkingOverride) thinkingLevelRejected = true
+        rejectedThinkingLevels.add(thinkingLevel)
         thinkingLevel = "low"
         generationConfig.thinkingConfig = { thinkingLevel }
         response = await doFetch()

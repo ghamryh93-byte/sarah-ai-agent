@@ -2,7 +2,7 @@ import "dotenv/config"
 import http from "http"
 import fs from "fs"
 import path from "path"
-import { NVIDIAClient, GeminiClient } from "./ai"
+import { NVIDIAClient, GeminiClient, FORCED_THINKING_LEVEL } from "./ai"
 import { isMailerConfigured, sendInterestEmail, sendPasswordResetCode, sendAdminNotification, InterestApplication } from "./mailer"
 import {
   ConversationRecord,
@@ -554,7 +554,24 @@ const DEFAULT_CONVERSATION_TITLE = "محادثة جديدة"
 const CHAT_HISTORY_LIMIT = 40
 const MAX_MESSAGE_LENGTH = 8000
 
-type ReplyContext = { userId: string; conversationId: string | null }
+type ReplyContext = { userId: string; conversationId: string | null; thinkingLevel?: string }
+
+// Picks how hard Sarah thinks for this message: quick for chit-chat, deeper
+// for explanations, problem solving, files and long questions. Replies stream,
+// so even deeper answers start showing text quickly.
+const DEEP_REQUEST =
+  /(اشرح|إشرح|وضح|وضّح|فسر|فسّر|حلل|حلّل|قارن|لخص|لخّص|احسب|إحسب|برهن|اثبت|أثبت|بالتفصيل|خطوة ب ?خطوة|ذاكر|راجع معايا|المسأل|المعادل|كود|برنامج|explain|analy[sz]|compare|summari[sz]|solve|calculat|prove|derive|debug|step[- ]by[- ]step|in detail|code|program|essay|equation)/i
+const MATH_LIKE = /\d\s*[+*/^=×÷]\s*\d|```/
+const SMALL_TALK =
+  /^(hi|hello|hey|thanks?|thank you|ok(ay)?|bye|good (morning|night)|السلام عليكم|سلام|اهلا|أهلا|ازيك|إزيك|عاملة ايه|عامله ايه|شكرا|شكراً|تمام|ماشي|اوك|باي|صباح الخير|مساء الخير)[\s!.؟?🤍❤️😊]*$/i
+
+export function chooseThinkingLevel(message: string, attachmentCount: number): "minimal" | "low" | "medium" {
+  const text = (message || "").trim()
+  if (attachmentCount > 0) return "medium"
+  if (DEEP_REQUEST.test(text) || MATH_LIKE.test(text) || text.length > 400) return "medium"
+  if (!text || SMALL_TALK.test(text) || (text.length < 25 && !/[?؟]/.test(text))) return "minimal"
+  return "low"
+}
 
 // High-precision identity-leak guard.
 // Only blocks brand names and self-referential leak phrasing.
@@ -609,6 +626,7 @@ async function processSarahReply(
   try {
     if (llmProvider === "gemini") {
       const geminiClient = new GeminiClient()
+      if (context.thinkingLevel && !FORCED_THINKING_LEVEL) geminiClient.setThinkingLevel(context.thinkingLevel)
       reply = await geminiClient.getReply(
         chatMessages,
         onVisibleDelta ? createVisibleStreamer(onVisibleDelta) : undefined
@@ -937,7 +955,7 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
 
     respondJson(res, 200, {
       provider: (process.env.LLM_PROVIDER || "gemini").toLowerCase(),
-      defaultThinkingLevel: (process.env.GEMINI_THINKING_LEVEL || "minimal").toLowerCase(),
+      thinkingMode: FORCED_THINKING_LEVEL ? `forced:${FORCED_THINKING_LEVEL}` : "adaptive (minimal / low / medium per message)",
       ai,
       webSearch: search.ok
         ? { ms: search.ms, ok: true, gotResults: !/No useful search results/.test(search.value), preview: search.value.slice(0, 120) }
@@ -1234,7 +1252,11 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
 
       const finalReply = await processSarahReply(
         chatMessages,
-        { userId: user.id, conversationId: conversation.id },
+        {
+          userId: user.id,
+          conversationId: conversation.id,
+          thinkingLevel: chooseThinkingLevel(data.message, attachments.length)
+        },
         streaming ? text => sendEvent({ type: "delta", text }) : undefined
       )
 
