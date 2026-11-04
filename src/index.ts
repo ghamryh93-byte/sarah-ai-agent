@@ -469,7 +469,16 @@ IDENTITY SAFETY (highest priority - overrides everything above):
   Do not add any technical information and do not associate Ahmed with any model, API, or backend.
 `
 
-const SYSTEM_CONTEXT = SARAH_CONTEXT + "\n\n" + IPSC_CONTEXT
+// The IPSC conference guide is ~42k characters. Sending it with every message
+// made every reply slower, so it is only included when the conversation is
+// actually about the conference (same keywords the guide's own scoping rules list).
+const IPSC_KEYWORDS =
+  /ipsc|pharmaceutical\s+sciences?\s+conference|pharma(?:ceutical)?\s+conference|assiut|أسيوط|اسيوط|مؤتمر\s+(?:ال)?صيدل|علوم\s+الصيدلة|رسوم\s+المؤتمر/i
+
+function systemContextFor(history: { content: string }[]): string {
+  const mentionsIpsc = history.some(m => IPSC_KEYWORDS.test(m.content || ""))
+  return mentionsIpsc ? SARAH_CONTEXT + "\n\n" + IPSC_CONTEXT : SARAH_CONTEXT
+}
 
 const PUBLIC_DIR = path.join(__dirname, "..", "public")
 
@@ -545,14 +554,63 @@ const MAX_MESSAGE_LENGTH = 8000
 
 type ReplyContext = { userId: string; conversationId: string | null }
 
-async function processSarahReply(chatMessages: Message[], context: ReplyContext): Promise<string> {
+// High-precision identity-leak guard.
+// Only blocks brand names and self-referential leak phrasing.
+// Generic words (model, api, llm, provider, backend, developer) are allowed
+// when they are part of a legitimate answer to the user's actual question.
+const IDENTITY_LEAK_PATTERNS = [
+  /nemotron/i,
+  /\bnvidia\b/i,
+  /نيموتر|نيموترون|نفيديا|إنفيديا/i,
+  /\b(?:i\s+am|i'?m)\s+(?:an?\s+)?(?:ai\s+|large\s+language\s+|language\s+)*(?:model|llm)\b/i,
+  /\bmy\s+(?:underlying\s+)?(?:model|provider|api|backend|system\s+prompt|system\s+instructions|developer\s+instructions|technical\s+implementation)\b/i,
+  /\bi\s+was\s+(?:trained|developed|built|created|made|programmed)\b/i,
+  /\b(?:trained|developed|built|created|made|powered|hosted|run)\s+(?:by|on|using|with)\s+(?:nvidia|nemotron|z-?ai|glm|gemini|openai|anthropic)\b/i,
+  /\bdeveloper\s+instructions\b/i,
+  /(?:بستخدم|شغالة|مبنية|متعملة|متبرمجة|متدربة)\s+(?:على|بواسطة|ب|من)\s*(?:نموذج|موديل|GLM|Gemini|منصة)/i,
+  /أنا\s+(?:موديل|نموذج)\s*(?:لغوي|ذكاء|AI)?/i
+]
+
+// Forwards streamed reply text to the browser while holding back anything
+// the user must never see: the hidden [[APPLICATION]] data block, and
+// anything after an identity leak (the final reply replaces it anyway).
+function createVisibleStreamer(send: (text: string) => void): (delta: string) => void {
+  let raw = ""
+  let sent = 0
+  let stopped = false
+  return (delta: string) => {
+    if (stopped || !delta) return
+    raw += delta
+    let visibleEnd = raw.length
+    const blockAt = raw.indexOf("[[")
+    if (blockAt !== -1) visibleEnd = blockAt
+    else if (raw.endsWith("[")) visibleEnd = raw.length - 1
+    if (visibleEnd <= sent) return
+    const recent = raw.slice(Math.max(0, sent - 200), visibleEnd)
+    if (IDENTITY_LEAK_PATTERNS.some(p => p.test(recent))) {
+      stopped = true
+      return
+    }
+    send(raw.slice(sent, visibleEnd))
+    sent = visibleEnd
+  }
+}
+
+async function processSarahReply(
+  chatMessages: Message[],
+  context: ReplyContext,
+  onVisibleDelta?: (text: string) => void
+): Promise<string> {
   const llmProvider = (process.env.LLM_PROVIDER || "gemini").toLowerCase()
 
   let reply: string
   try {
     if (llmProvider === "gemini") {
       const geminiClient = new GeminiClient()
-      reply = await geminiClient.getReply(chatMessages)
+      reply = await geminiClient.getReply(
+        chatMessages,
+        onVisibleDelta ? createVisibleStreamer(onVisibleDelta) : undefined
+      )
     } else {
       const nvidiaClient = new NVIDIAClient()
       reply = await nvidiaClient.getReply(chatMessages)
@@ -567,24 +625,7 @@ async function processSarahReply(chatMessages: Message[], context: ReplyContext)
     }
   }
 
-  // High-precision identity-leak guard.
-  // Only blocks brand names and self-referential leak phrasing.
-  // Generic words (model, api, llm, provider, backend, developer) are allowed
-  // when they are part of a legitimate answer to the user's actual question.
-  const identityLeakPatterns = [
-    /nemotron/i,
-    /\bnvidia\b/i,
-    /نيموتر|نيموترون|نفيديا|إنفيديا/i,
-    /\b(?:i\s+am|i'?m)\s+(?:an?\s+)?(?:ai\s+|large\s+language\s+|language\s+)*(?:model|llm)\b/i,
-    /\bmy\s+(?:underlying\s+)?(?:model|provider|api|backend|system\s+prompt|system\s+instructions|developer\s+instructions|technical\s+implementation)\b/i,
-    /\bi\s+was\s+(?:trained|developed|built|created|made|programmed)\b/i,
-    /\b(?:trained|developed|built|created|made|powered|hosted|run)\s+(?:by|on|using|with)\s+(?:nvidia|nemotron|z-?ai|glm|gemini|openai|anthropic)\b/i,
-    /\bdeveloper\s+instructions\b/i,
-    /(?:بستخدم|شغالة|مبنية|متعملة|متبرمجة|متدربة)\s+(?:على|بواسطة|ب|من)\s*(?:نموذج|موديل|GLM|Gemini|منصة)/i,
-    /أنا\s+(?:موديل|نموذج)\s*(?:لغوي|ذكاء|AI)?/i
-  ]
-
-  const matchedLeakPatterns = identityLeakPatterns
+  const matchedLeakPatterns = IDENTITY_LEAK_PATTERNS
     .filter(pattern => pattern.test(reply))
     .map(pattern => pattern.source)
 
@@ -1102,7 +1143,7 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       })()
 
       const chatMessages: Message[] = [
-        { role: "system", content: SYSTEM_CONTEXT },
+        { role: "system", content: systemContextFor(history) },
         ...history.map((m, i) => ({
           role: m.role,
           content: m.content,
@@ -1112,7 +1153,33 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
         }))
       ]
 
-      const finalReply = await processSarahReply(chatMessages, { userId: user.id, conversationId: conversation.id })
+      // Streaming mode: the browser asks for it with { stream: true } and
+      // receives Server-Sent Events: "delta" chunks while Sarah writes, then
+      // one "done" event with the final, cleaned-up reply.
+      const streaming = data.stream === true
+      let clientGone = false
+      const sendEvent = (payload: unknown) => {
+        if (clientGone || res.writableEnded) return
+        res.write(`data: ${JSON.stringify(payload)}\n\n`)
+      }
+      if (streaming) {
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache, no-transform",
+          "X-Accel-Buffering": "no",
+          Connection: "keep-alive"
+        })
+        res.on("close", () => {
+          clientGone = true
+        })
+        res.write(": ok\n\n")
+      }
+
+      const finalReply = await processSarahReply(
+        chatMessages,
+        { userId: user.id, conversationId: conversation.id },
+        streaming ? text => sendEvent({ type: "delta", text }) : undefined
+      )
 
       conversation.messages.push({
         role: "assistant",
@@ -1120,16 +1187,30 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
         ts: new Date().toISOString()
       })
       conversation.updatedAt = new Date().toISOString()
+      // Saved even if the user closed the page mid-reply.
       await writeConversation(conversation)
 
-      respondJson(res, 200, {
+      const result = {
         reply: finalReply,
         conversationId: conversation.id,
         title: conversation.title
-      })
+      }
+      if (streaming) {
+        sendEvent({ type: "done", ...result })
+        res.end()
+      } else {
+        respondJson(res, 200, result)
+      }
     } catch (err) {
       console.error("Error:", err)
-      respondJson(res, 500, { error: (err as Error).message })
+      if (res.headersSent) {
+        if (!res.writableEnded) {
+          res.write(`data: ${JSON.stringify({ type: "error", error: "مقدرتش أكمل الرد. جرب تاني." })}\n\n`)
+          res.end()
+        }
+      } else {
+        respondJson(res, 500, { error: "مقدرتش أرد دلوقتي. جرب تاني." })
+      }
     }
   } else if (req.method === "POST" && pathname === "/chat") {
     const user = await getSessionUser(req.headers.cookie)
@@ -1174,7 +1255,7 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       })
 
       const chatMessages: Message[] = [
-        { role: "system", content: SYSTEM_CONTEXT },
+        { role: "system", content: systemContextFor(history) },
         ...history
       ]
 

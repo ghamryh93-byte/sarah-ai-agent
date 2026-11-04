@@ -170,6 +170,78 @@
     messagesEl.appendChild(wrap)
 
     if (!isHistory) scrollBottom()
+    return bubble
+  }
+
+  // True when the reader is at (or near) the bottom, so streaming text only
+  // auto-scrolls if they haven't scrolled up to read something earlier.
+  function isNearBottom() {
+    return chatAreaEl.scrollHeight - chatAreaEl.scrollTop - chatAreaEl.clientHeight < 80
+  }
+
+  // Sends a chat message and streams Sarah's reply as it is written.
+  // onDelta(text) is called for each new piece; resolves with the final
+  // { reply, conversationId, title }. Falls back to a normal JSON response.
+  function streamChat(body, onDelta) {
+    return fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify(Object.assign({ stream: true }, body))
+    }).then(function (res) {
+      var type = res.headers.get("Content-Type") || ""
+      if (type.indexOf("text/event-stream") === -1 || !res.body || !res.body.getReader) {
+        return res.json().catch(function () {
+          return {}
+        }).then(function (data) {
+          if (!res.ok) {
+            throw { status: res.status, error: (data && data.error) || "حصلت مشكلة، حاول تاني." }
+          }
+          return data
+        })
+      }
+
+      var reader = res.body.getReader()
+      var decoder = new TextDecoder()
+      var buffer = ""
+      var finalData = null
+      var streamError = null
+
+      function handleEvent(raw) {
+        var lines = raw.split("\n")
+        for (var i = 0; i < lines.length; i++) {
+          if (lines[i].indexOf("data: ") !== 0) continue
+          var evt
+          try {
+            evt = JSON.parse(lines[i].slice(6))
+          } catch (e) {
+            continue
+          }
+          if (evt.type === "delta" && evt.text) onDelta(evt.text)
+          else if (evt.type === "done") finalData = evt
+          else if (evt.type === "error") streamError = { error: evt.error }
+        }
+      }
+
+      function pump() {
+        return reader.read().then(function (chunk) {
+          if (chunk.done) {
+            buffer += decoder.decode()
+            if (buffer.trim()) handleEvent(buffer)
+            if (streamError) throw streamError
+            if (!finalData) throw { error: "الرد اتقطع قبل ما يخلص. جرب تاني." }
+            return finalData
+          }
+          buffer += decoder.decode(chunk.value, { stream: true })
+          var parts = buffer.split("\n\n")
+          buffer = parts.pop()
+          for (var i = 0; i < parts.length; i++) handleEvent(parts[i])
+          return pump()
+        })
+      }
+
+      return pump()
+    })
   }
 
   function showTyping() {
@@ -389,18 +461,36 @@
       })
     }
 
+    var liveBubble = null
+    var liveText = ""
+
     prepare.then(function (conversationId) {
-      return app.api("/api/chat", {
-        method: "POST",
-        body: {
+      return streamChat(
+        {
           conversationId: conversationId,
           message: text,
           attachments: attachments
+        },
+        function (delta) {
+          var follow = isNearBottom()
+          if (!liveBubble) {
+            hideTyping()
+            liveBubble = addMessage("assistant", "")
+          }
+          liveText += delta
+          liveBubble.textContent = liveText
+          if (follow) scrollBottom()
         }
-      })
+      )
     }).then(function (data) {
       hideTyping()
-      addMessage("assistant", data.reply)
+      // The server's final text is authoritative (it may differ slightly
+      // from what streamed in, e.g. hidden data removed).
+      if (liveBubble) {
+        liveBubble.textContent = data.reply
+      } else {
+        addMessage("assistant", data.reply)
+      }
       app.state.currentTitle = data.title || app.state.currentTitle
       setHeaderTitle(app.state.currentTitle)
       app.state.sending = false
@@ -408,6 +498,7 @@
       refreshList()
     }).catch(function (err) {
       hideTyping()
+      if (liveBubble && liveBubble.parentElement) liveBubble.parentElement.remove()
       app.state.sending = false
       sendBtn.disabled = false
       if (!isRetry && attachments.length) {

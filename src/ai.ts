@@ -291,7 +291,10 @@ export class GeminiClient {
     }
   }
 
-  async getReply(messages: ChatMessage[]): Promise<string> {
+  // onDelta receives reply text as it streams in. It may also receive text
+  // from a round that ends in a tool call; callers should treat the final
+  // returned string as authoritative.
+  async getReply(messages: ChatMessage[], onDelta?: (text: string) => void): Promise<string> {
     const systemParts = messages
       .filter(m => m.role === "system")
       .map(m => m.content)
@@ -335,7 +338,7 @@ export class GeminiClient {
     const executedQueries: string[] = []
 
     for (let round = 0; round < 3; round++) {
-      const result = await this.requestGemini(systemParts, nativeContents, webSearchTool)
+      const result = await this.requestGemini(systemParts, nativeContents, webSearchTool, onDelta)
       full = result.text
 
       if (result.functionCalls.length === 0) {
@@ -386,7 +389,7 @@ export class GeminiClient {
       // Make one last request without tools to force a direct text answer
       // instead of failing the whole request.
       console.log("No final text after tool rounds, requesting a direct answer without tools")
-      const finalResult = await this.requestGemini(systemParts, nativeContents, undefined)
+      const finalResult = await this.requestGemini(systemParts, nativeContents, undefined, onDelta)
       full = finalResult.text
     }
 
@@ -428,7 +431,8 @@ export class GeminiClient {
   private async requestGemini(
     systemText: string,
     contents: unknown[],
-    tools: unknown
+    tools: unknown,
+    onDelta?: (text: string) => void
   ): Promise<{ text: string; functionCalls: { name: string; args: Record<string, unknown> }[]; finishReason: string | null }> {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:streamGenerateContent?alt=sse`
 
@@ -512,7 +516,16 @@ export class GeminiClient {
         if (candidates.length > 0) {
           const parts = (candidates[0].content && candidates[0].content.parts) || []
           for (const p of parts) {
-            if (p.text) full += p.text
+            if (p.text && !p.thought) {
+              full += p.text
+              if (onDelta) {
+                try {
+                  onDelta(p.text)
+                } catch {
+                  // a failing listener must never break the reply
+                }
+              }
+            }
             if (p.functionCall && p.functionCall.name) {
               functionCalls.push({
                 name: p.functionCall.name,
