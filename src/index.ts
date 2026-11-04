@@ -6,7 +6,6 @@ import { NVIDIAClient, GeminiClient } from "./ai"
 import { isMailerConfigured, sendInterestEmail, sendPasswordResetCode, sendAdminNotification, InterestApplication } from "./mailer"
 import {
   ConversationRecord,
-  findUserByEmail,
   generateId,
   listConversationsForUser,
   readConversation,
@@ -15,10 +14,8 @@ import {
   getAllUsers,
   listAllConversations,
   isAdminEmail,
-  syncStorageWithCloud,
-  persistUsersAsync,
-  persistSessionsAsync,
   getStorageEngineInfo,
+  saveApplication,
   saveMessageAttachment,
   AttachmentValidationError,
   MessageAttachment
@@ -38,6 +35,7 @@ import {
   consumePasswordReset
 } from "./auth"
 import { IPSC_CONTEXT } from "./knowledge-ipsc"
+import { RATE_LIMITS, hit, reset as resetRateLimit, clientIp, tooManyRequests } from "./rateLimit"
 
 type Message = {
   role: "system" | "user" | "assistant"
@@ -545,7 +543,9 @@ const DEFAULT_CONVERSATION_TITLE = "محادثة جديدة"
 const CHAT_HISTORY_LIMIT = 40
 const MAX_MESSAGE_LENGTH = 8000
 
-async function processSarahReply(chatMessages: Message[]): Promise<string> {
+type ReplyContext = { userId: string; conversationId: string | null }
+
+async function processSarahReply(chatMessages: Message[], context: ReplyContext): Promise<string> {
   const llmProvider = (process.env.LLM_PROVIDER || "gemini").toLowerCase()
 
   let reply: string
@@ -604,17 +604,31 @@ async function processSarahReply(chatMessages: Message[]): Promise<string> {
 
     try {
       const application = JSON.parse(applicationMatch[1]) as InterestApplication
+      const field = (v: unknown, max = 500) => (typeof v === "string" ? v.trim().slice(0, max) : "")
 
-      const logLine = JSON.stringify({
-        receivedAt: new Date().toISOString(),
-        application
-      })
-      const appsLogFile = process.env.VERCEL ? path.join("/tmp", "applications.log") : "applications.log"
       try {
-        fs.appendFileSync(appsLogFile, logLine + "\n", "utf8")
-        console.log("Application collected and stored")
-      } catch (logErr) {
-        console.warn("Could not write to applications.log:", logErr)
+        await saveApplication({
+          id: generateId("app"),
+          userId: context.userId,
+          conversationId: context.conversationId,
+          fullName: field(application.fullName, 120),
+          phone: field(application.phone, 40),
+          email: field(application.email, 254),
+          university: field(application.university, 160),
+          faculty: field(application.faculty, 160),
+          academicYear: field(application.academicYear, 60),
+          request: field(application.request, 1000),
+          role: field(application.role, 160),
+          skills: field(application.skills, 2000),
+          notes: field(application.notes, 2000),
+          status: "new",
+          createdAt: new Date().toISOString()
+        })
+        console.log("Application collected and saved to database")
+      } catch (saveErr) {
+        // Last-resort copy in the server logs so the application is never lost.
+        console.error("Application DB save failed:", (saveErr as Error).message)
+        console.error("APPLICATION_BACKUP " + JSON.stringify({ receivedAt: new Date().toISOString(), userId: context.userId, application }))
       }
 
       if (isMailerConfigured()) {
@@ -636,13 +650,17 @@ async function processSarahReply(chatMessages: Message[]): Promise<string> {
 }
 
 export async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-  await syncStorageWithCloud()
   const host = req.headers.host || "localhost"
   const rawUrl = (req.headers["x-forwarded-uri"] as string) || req.url || "/"
   const parsedUrl = new URL(rawUrl, `http://${host}`)
   const pathname = parsedUrl.pathname
 
   if (req.method === "POST" && pathname === "/api/auth/register") {
+    const ipWait = hit(RATE_LIMITS.register, "ip:" + clientIp(req))
+    if (ipWait) {
+      tooManyRequests(res, ipWait, "Too many sign-up attempts. Please try again later.")
+      return
+    }
     const bodyResult = await readJsonBody(req)
     if (!bodyResult.ok) {
       respondJson(res, bodyResult.status, { error: bodyResult.error })
@@ -681,8 +699,6 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
 
     const session = await createSession(result.user.id)
     console.log(`Auth: user registered (${result.user.id})`)
-    await persistUsersAsync()
-    await persistSessionsAsync()
 
     sendAdminNotification("New User Registered 🎉", {
       "Full Name": result.user.fullName,
@@ -695,6 +711,11 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       "Set-Cookie": sessionCookieHeader(session.token)
     })
   } else if (req.method === "POST" && pathname === "/api/auth/login") {
+    const ipWait = hit(RATE_LIMITS.login, "ip:" + clientIp(req))
+    if (ipWait) {
+      tooManyRequests(res, ipWait, "Too many login attempts. Please try again later.")
+      return
+    }
     const bodyResult = await readJsonBody(req)
     if (!bodyResult.ok) {
       respondJson(res, bodyResult.status, { error: bodyResult.error })
@@ -707,16 +728,23 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       return
     }
 
-    const user = authenticate(data.email, data.password)
+    const emailKey = "email:" + data.email.trim().toLowerCase()
+    const emailWait = hit(RATE_LIMITS.login, emailKey)
+    if (emailWait) {
+      tooManyRequests(res, emailWait, "Too many login attempts for this account. Please try again later.")
+      return
+    }
+
+    const user = await authenticate(data.email, data.password)
     if (!user) {
       console.log("Auth: login failed")
       respondJson(res, 401, { error: "The email or password is incorrect." })
       return
     }
+    resetRateLimit(RATE_LIMITS.login, emailKey)
 
     const session = await createSession(user.id)
     console.log(`Auth: login ok (${user.id})`)
-    await persistSessionsAsync()
 
     sendAdminNotification("User Logged In 🔑", {
       "Full Name": user.fullName,
@@ -728,19 +756,29 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       "Set-Cookie": sessionCookieHeader(session.token)
     })
   } else if (req.method === "POST" && pathname === "/api/auth/logout") {
-    revokeSessionByCookie(req.headers.cookie)
-    await persistSessionsAsync()
+    try {
+      await revokeSessionByCookie(req.headers.cookie)
+    } catch (err) {
+      console.error("Auth: logout revoke failed:", (err as Error).message)
+      respondJson(res, 500, { error: "Logout failed. Please try again." })
+      return
+    }
     respondJson(res, 200, { ok: true }, {
       "Set-Cookie": clearSessionCookieHeader()
     })
   } else if (req.method === "GET" && pathname === "/api/auth/me") {
-    const user = getSessionUser(req.headers.cookie)
+    const user = await getSessionUser(req.headers.cookie)
     if (!user) {
       respondJson(res, 401, { error: "Not authenticated" })
       return
     }
     respondJson(res, 200, { user: { ...toPublicUser(user), isAdmin: isAdminEmail(user.email) } })
   } else if (req.method === "POST" && pathname === "/api/auth/forgot-password") {
+    const ipWait = hit(RATE_LIMITS.forgotPassword, "ip:" + clientIp(req))
+    if (ipWait) {
+      tooManyRequests(res, ipWait, "Too many reset requests. Please try again later.")
+      return
+    }
     const bodyResult = await readJsonBody(req)
     if (!bodyResult.ok) {
       respondJson(res, bodyResult.status, { error: bodyResult.error })
@@ -773,6 +811,11 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       message: "If the email is registered, a reset code has been sent to it."
     })
   } else if (req.method === "POST" && pathname === "/api/auth/reset-password") {
+    const ipWait = hit(RATE_LIMITS.resetPassword, "ip:" + clientIp(req))
+    if (ipWait) {
+      tooManyRequests(res, ipWait, "Too many attempts. Please try again later.")
+      return
+    }
     const bodyResult = await readJsonBody(req)
     if (!bodyResult.ok) {
       respondJson(res, bodyResult.status, { error: bodyResult.error })
@@ -804,12 +847,12 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       respondJson(res, 400, { error: "The reset code is invalid or has expired." })
     }
   } else if (req.method === "GET" && pathname === "/api/admin/data") {
-    const user = getSessionUser(req.headers.cookie)
+    const user = await getSessionUser(req.headers.cookie)
     if (!user || !isAdminEmail(user.email)) {
       respondJson(res, 403, { error: "Forbidden: Admins only." })
       return
     }
-    const allUsers = getAllUsers()
+    const allUsers = await getAllUsers()
     const allConversations = await listAllConversations()
     const userMap: Record<string, string> = {}
     for (const u of allUsers) userMap[u.id] = u.fullName
@@ -828,7 +871,7 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       }))
     })
   } else if (req.method === "POST" && pathname === "/api/conversations") {
-    const user = getSessionUser(req.headers.cookie)
+    const user = await getSessionUser(req.headers.cookie)
     if (!user) {
       respondJson(res, 401, { error: "Not authenticated" })
       return
@@ -846,10 +889,17 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
     await writeConversation(conversation)
     respondJson(res, 201, { conversation })
   } else if (req.method === "POST" && pathname === "/api/upload") {
-    const user = getSessionUser(req.headers.cookie)
+    const user = await getSessionUser(req.headers.cookie)
     if (!user) {
       respondJson(res, 401, { error: "Not authenticated" })
       return
+    }
+    {
+      const wait = hit(RATE_LIMITS.upload, "user:" + user.id)
+      if (wait) {
+        tooManyRequests(res, wait)
+        return
+      }
     }
 
     const bodyResult = await readJsonBody(req, UPLOAD_BODY_MAX_BYTES)
@@ -890,10 +940,17 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       })
     }
   } else if (req.method === "POST" && pathname === "/api/transcript/fix") {
-    const user = getSessionUser(req.headers.cookie)
+    const user = await getSessionUser(req.headers.cookie)
     if (!user) {
       respondJson(res, 401, { error: "Not authenticated" })
       return
+    }
+    {
+      const wait = hit(RATE_LIMITS.voice, "user:" + user.id)
+      if (wait) {
+        tooManyRequests(res, wait)
+        return
+      }
     }
 
     const bodyResult = await readJsonBody(req)
@@ -918,10 +975,17 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       respondJson(res, 200, { text: raw })
     }
   } else if (req.method === "POST" && pathname === "/api/transcribe") {
-    const user = getSessionUser(req.headers.cookie)
+    const user = await getSessionUser(req.headers.cookie)
     if (!user) {
       respondJson(res, 401, { error: "Not authenticated" })
       return
+    }
+    {
+      const wait = hit(RATE_LIMITS.voice, "user:" + user.id)
+      if (wait) {
+        tooManyRequests(res, wait)
+        return
+      }
     }
 
     const bodyResult = await readJsonBody(req, UPLOAD_BODY_MAX_BYTES)
@@ -958,10 +1022,24 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       })
     }
   } else if (req.method === "POST" && pathname === "/api/chat") {
-    const user = getSessionUser(req.headers.cookie)
+    const user = await getSessionUser(req.headers.cookie)
     if (!user) {
       respondJson(res, 401, { error: "Not authenticated" })
       return
+    }
+    {
+      const wait = hit(RATE_LIMITS.chatPerMinute, "user:" + user.id)
+      if (wait) {
+        tooManyRequests(res, wait)
+        return
+      }
+    }
+    {
+      const wait = hit(RATE_LIMITS.chatPerDay, "user:" + user.id)
+      if (wait) {
+        tooManyRequests(res, wait)
+        return
+      }
     }
 
     const bodyResult = await readJsonBody(req)
@@ -983,6 +1061,8 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       respondJson(res, 400, { error: "conversationId و message مطلوبين." })
       return
     }
+
+    if (typeof data.message !== "string") data.message = ""
 
     if (data.message.length > MAX_MESSAGE_LENGTH) {
       respondJson(res, 400, { error: "الرسالة أطول من اللازم." })
@@ -1032,7 +1112,7 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
         }))
       ]
 
-      const finalReply = await processSarahReply(chatMessages)
+      const finalReply = await processSarahReply(chatMessages, { userId: user.id, conversationId: conversation.id })
 
       conversation.messages.push({
         role: "assistant",
@@ -1052,10 +1132,24 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       respondJson(res, 500, { error: (err as Error).message })
     }
   } else if (req.method === "POST" && pathname === "/chat") {
-    const user = getSessionUser(req.headers.cookie)
+    const user = await getSessionUser(req.headers.cookie)
     if (!user) {
       respondJson(res, 401, { error: "Not authenticated" })
       return
+    }
+    {
+      const wait = hit(RATE_LIMITS.chatPerMinute, "user:" + user.id)
+      if (wait) {
+        tooManyRequests(res, wait)
+        return
+      }
+    }
+    {
+      const wait = hit(RATE_LIMITS.chatPerDay, "user:" + user.id)
+      if (wait) {
+        tooManyRequests(res, wait)
+        return
+      }
     }
 
     const bodyResult = await readJsonBody(req)
@@ -1084,7 +1178,7 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
         ...history
       ]
 
-      const finalReply = await processSarahReply(chatMessages)
+      const finalReply = await processSarahReply(chatMessages, { userId: user.id, conversationId: null })
 
       history.push({
         role: "assistant",
@@ -1146,7 +1240,7 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
       res.end(JSON.stringify({ status: "EVENT_RECEIVED" }))
     })
   } else if ((req.method === "GET" || req.method === "DELETE") && pathname.startsWith("/api/conversations")) {
-    const user = getSessionUser(req.headers.cookie)
+    const user = await getSessionUser(req.headers.cookie)
     if (!user) {
       respondJson(res, 401, { error: "Not authenticated" })
       return
